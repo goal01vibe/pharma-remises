@@ -1,0 +1,232 @@
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from sqlalchemy.orm import Session
+from typing import Optional
+import pandas as pd
+import io
+import time
+
+from app.db import get_db
+from app.models import Import, CatalogueProduit, MesVentes, Laboratoire
+from app.schemas import ImportResponse, ExtractionPDFResponse, LigneExtraite
+from app.services.pdf_extraction import extract_catalogue_from_pdf
+
+router = APIRouter(prefix="/api/import", tags=["Import"])
+
+
+@router.post("/catalogue", response_model=ImportResponse)
+async def import_catalogue(
+    file: UploadFile = File(...),
+    laboratoire_id: int = Form(...),
+    db: Session = Depends(get_db)
+):
+    """Importe un catalogue depuis Excel/CSV."""
+    # Verifier le labo
+    labo = db.query(Laboratoire).filter(Laboratoire.id == laboratoire_id).first()
+    if not labo:
+        raise HTTPException(status_code=404, detail="Laboratoire non trouve")
+
+    # Creer l'import
+    db_import = Import(
+        type_import="catalogue",
+        nom_fichier=file.filename,
+        laboratoire_id=laboratoire_id,
+        statut="en_cours",
+    )
+    db.add(db_import)
+    db.commit()
+    db.refresh(db_import)
+
+    try:
+        # Lire le fichier
+        content = await file.read()
+        if file.filename.endswith(".csv"):
+            df = pd.read_csv(io.BytesIO(content))
+        else:
+            df = pd.read_excel(io.BytesIO(content))
+
+        # Mapper les colonnes (flexible)
+        column_mapping = {
+            "code_cip": ["code_cip", "cip", "code", "CIP", "Code CIP"],
+            "designation": ["designation", "nom", "libelle", "produit", "Designation"],
+            "prix_ht": ["prix_ht", "prix", "tarif", "Prix HT", "PPHT"],
+            "remise_pct": ["remise_pct", "remise", "Remise", "% Remise"],
+        }
+
+        def find_column(df, candidates):
+            for col in candidates:
+                if col in df.columns:
+                    return col
+            return None
+
+        mapped_cols = {}
+        for target, candidates in column_mapping.items():
+            found = find_column(df, candidates)
+            if found:
+                mapped_cols[target] = found
+
+        nb_imported = 0
+        nb_error = 0
+
+        for _, row in df.iterrows():
+            try:
+                code_cip = str(row.get(mapped_cols.get("code_cip", ""), "")).strip() if mapped_cols.get("code_cip") else None
+                designation = str(row.get(mapped_cols.get("designation", ""), "")).strip() if mapped_cols.get("designation") else None
+                prix_ht = float(row.get(mapped_cols.get("prix_ht", ""), 0)) if mapped_cols.get("prix_ht") else None
+                remise_pct = float(row.get(mapped_cols.get("remise_pct", ""), 0)) if mapped_cols.get("remise_pct") else None
+
+                if code_cip or designation:
+                    produit = CatalogueProduit(
+                        laboratoire_id=laboratoire_id,
+                        code_cip=code_cip if code_cip else None,
+                        nom_commercial=designation if designation else None,
+                        prix_ht=prix_ht if prix_ht else None,
+                        remise_pct=remise_pct if remise_pct else None,
+                    )
+                    db.add(produit)
+                    nb_imported += 1
+            except Exception:
+                nb_error += 1
+
+        db.commit()
+
+        # Mettre a jour l'import
+        db_import.nb_lignes_importees = nb_imported
+        db_import.nb_lignes_erreur = nb_error
+        db_import.statut = "termine"
+        db.commit()
+        db.refresh(db_import)
+
+        return db_import
+
+    except Exception as e:
+        db_import.statut = "erreur"
+        db.commit()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/ventes", response_model=ImportResponse)
+async def import_ventes(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """Importe les ventes depuis Excel/CSV."""
+    db_import = Import(
+        type_import="ventes",
+        nom_fichier=file.filename,
+        statut="en_cours",
+    )
+    db.add(db_import)
+    db.commit()
+    db.refresh(db_import)
+
+    try:
+        content = await file.read()
+        if file.filename.endswith(".csv"):
+            df = pd.read_csv(io.BytesIO(content))
+        else:
+            df = pd.read_excel(io.BytesIO(content))
+
+        # Mapping colonnes ventes
+        column_mapping = {
+            "code_cip": ["code_cip", "cip", "code", "CIP"],
+            "designation": ["designation", "nom", "libelle", "produit"],
+            "quantite": ["quantite", "qte", "quantite_annuelle", "Quantite"],
+            "prix_unitaire": ["prix_unitaire", "prix", "PA", "Prix achat"],
+            "labo": ["labo", "laboratoire", "fournisseur"],
+        }
+
+        def find_column(df, candidates):
+            for col in candidates:
+                if col in df.columns:
+                    return col
+            return None
+
+        mapped_cols = {}
+        for target, candidates in column_mapping.items():
+            found = find_column(df, candidates)
+            if found:
+                mapped_cols[target] = found
+
+        nb_imported = 0
+        nb_error = 0
+
+        for _, row in df.iterrows():
+            try:
+                code_cip = str(row.get(mapped_cols.get("code_cip", ""), "")).strip() if mapped_cols.get("code_cip") else None
+                designation = str(row.get(mapped_cols.get("designation", ""), "")).strip() if mapped_cols.get("designation") else None
+                quantite = int(row.get(mapped_cols.get("quantite", ""), 0)) if mapped_cols.get("quantite") else None
+                prix_unitaire = float(row.get(mapped_cols.get("prix_unitaire", ""), 0)) if mapped_cols.get("prix_unitaire") else None
+                labo = str(row.get(mapped_cols.get("labo", ""), "")).strip() if mapped_cols.get("labo") else None
+
+                montant = quantite * prix_unitaire if quantite and prix_unitaire else None
+
+                if code_cip or designation:
+                    vente = MesVentes(
+                        import_id=db_import.id,
+                        code_cip_achete=code_cip if code_cip else None,
+                        designation=designation if designation else None,
+                        quantite_annuelle=quantite,
+                        prix_achat_unitaire=prix_unitaire,
+                        montant_annuel=montant,
+                        labo_actuel=labo if labo else None,
+                    )
+                    db.add(vente)
+                    nb_imported += 1
+            except Exception:
+                nb_error += 1
+
+        db.commit()
+
+        db_import.nb_lignes_importees = nb_imported
+        db_import.nb_lignes_erreur = nb_error
+        db_import.statut = "termine"
+        db.commit()
+        db.refresh(db_import)
+
+        return db_import
+
+    except Exception as e:
+        db_import.statut = "erreur"
+        db.commit()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/extract-pdf", response_model=ExtractionPDFResponse)
+async def extract_pdf(
+    file: UploadFile = File(...),
+    page_debut: int = Form(1),
+    page_fin: Optional[int] = Form(None),
+    modele_ia: str = Form("auto"),
+    db: Session = Depends(get_db)
+):
+    """Extrait les donnees d'un PDF avec IA."""
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Le fichier doit etre un PDF")
+
+    start_time = time.time()
+    content = await file.read()
+
+    result = await extract_catalogue_from_pdf(
+        pdf_content=content,
+        page_debut=page_debut,
+        page_fin=page_fin,
+        modele_ia=modele_ia,
+    )
+
+    elapsed = time.time() - start_time
+
+    return ExtractionPDFResponse(
+        lignes=[LigneExtraite(**l) for l in result["lignes"]],
+        nb_pages_traitees=result["nb_pages"],
+        modele_utilise=result["modele"],
+        temps_extraction_s=round(elapsed, 2),
+    )
+
+
+@router.get("/{import_id}", response_model=ImportResponse)
+def get_import_status(import_id: int, db: Session = Depends(get_db)):
+    """Recupere le statut d'un import."""
+    db_import = db.query(Import).filter(Import.id == import_id).first()
+    if not db_import:
+        raise HTTPException(status_code=404, detail="Import non trouve")
+    return db_import
