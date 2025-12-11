@@ -19,6 +19,7 @@ import type {
   PaginatedResponse,
   RegleRemontee,
   RegleRemonteeCreate,
+  CatalogueComparison,
 } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8003'
@@ -122,6 +123,20 @@ export const catalogueApi = {
 
   bulkUpdateRemontee: async (ids: number[], remontee_pct: number | null): Promise<void> => {
     await api.patch('/api/catalogue/bulk/remontee', { ids, remontee_pct })
+  },
+
+  delete: async (id: number): Promise<void> => {
+    await api.delete(`/api/catalogue/${id}`)
+  },
+
+  clearCatalogue: async (laboId: number): Promise<{ count: number }> => {
+    const { data } = await api.delete(`/api/catalogue/laboratoire/${laboId}/clear`)
+    return data
+  },
+
+  compare: async (labo1Id: number, labo2Id: number): Promise<CatalogueComparison> => {
+    const { data } = await api.get(`/api/catalogue/compare/${labo1Id}/${labo2Id}`)
+    return data
   },
 }
 
@@ -281,7 +296,7 @@ export const parametresApi = {
 }
 
 // ===================
-// MATCHING
+// MATCHING (Legacy)
 // ===================
 export const matchingApi = {
   autoMatch: async (produitId: number): Promise<MatchingResult> => {
@@ -295,6 +310,275 @@ export const matchingApi = {
 
   getUnmatched: async (laboId: number): Promise<CatalogueProduit[]> => {
     const { data } = await api.get(`/api/matching/unmatched/${laboId}`)
+    return data
+  },
+}
+
+// ===================
+// MATCHING INTELLIGENT
+// ===================
+export interface ProcessSalesRequest {
+  import_id: number
+  min_score?: number
+}
+
+export interface ProcessSalesResponse {
+  import_id: number
+  total_ventes: number
+  matching_results: {
+    matched: number
+    unmatched: number
+    by_lab: Array<{
+      lab_id: number
+      lab_nom: string
+      matched_count: number
+      total_montant_matched: number
+      couverture_pct: number
+    }>
+  }
+  unmatched_products: Array<{
+    vente_id: number
+    designation: string
+    montant: number
+    candidates?: Array<{ lab: string; produit: string; score: number }>
+  }>
+  processing_time_s: number
+}
+
+export interface AnalyzeMatchRequest {
+  designation: string
+  code_cip?: string
+}
+
+export interface AnalyzeMatchResponse {
+  extracted: {
+    molecule?: string
+    dosage?: string
+    forme?: string
+    conditionnement?: string
+  }
+  matches_by_lab: Array<{
+    produit_id: number
+    labo_id: number
+    labo_nom: string
+    nom_commercial: string
+    code_cip?: string
+    score: number
+    match_type: string
+    matched_on?: string
+    prix_ht?: number
+    remise_pct?: number
+  }>
+}
+
+export interface MatchingStatsResponse {
+  import_id: number
+  total_ventes: number
+  total_montant_ht: number
+  matching_done: boolean
+  matched_ventes?: number
+  unmatched_ventes?: number
+  by_lab?: Array<{
+    lab_id: number
+    lab_nom: string
+    matched_count: number
+    total_montant_matched: number
+    couverture_count_pct: number
+    couverture_montant_pct: number
+    avg_match_score: number
+  }>
+}
+
+export const intelligentMatchingApi = {
+  processSales: async (request: ProcessSalesRequest): Promise<ProcessSalesResponse> => {
+    const { data } = await api.post('/api/matching/process-sales', request)
+    return data
+  },
+
+  analyze: async (request: AnalyzeMatchRequest): Promise<AnalyzeMatchResponse> => {
+    const { data } = await api.post('/api/matching/analyze', request)
+    return data
+  },
+
+  getStats: async (importId: number): Promise<MatchingStatsResponse> => {
+    const { data } = await api.get(`/api/matching/stats/${importId}`)
+    return data
+  },
+
+  clear: async (importId: number): Promise<{ deleted: number }> => {
+    const { data } = await api.delete(`/api/matching/clear/${importId}`)
+    return data
+  },
+}
+
+// ===================
+// SIMULATION WITH MATCHING
+// ===================
+export interface SimulationWithMatchingRequest {
+  import_id: number
+  labo_principal_id: number
+  remise_negociee?: number
+}
+
+export interface SimulationLineResult {
+  vente_id: number
+  designation: string
+  quantite: number
+  montant_ht: number
+  produit_id?: number
+  produit_nom?: string
+  disponible: boolean
+  match_score?: number
+  match_type?: string
+  remise_ligne_pct?: number
+  montant_remise_ligne?: number
+  statut_remontee?: string
+  remontee_cible?: number
+  montant_remontee?: number
+  remise_totale_pct?: number
+  montant_total_remise?: number
+}
+
+export interface SimulationWithMatchingResponse {
+  labo: Laboratoire
+  totaux: TotauxSimulation
+  details: SimulationLineResult[]
+  matching_stats: {
+    exact_cip: number
+    groupe_generique: number
+    fuzzy_molecule: number
+    fuzzy_commercial: number
+    no_match: number
+    avg_score: number
+  }
+}
+
+export const simulationWithMatchingApi = {
+  run: async (request: SimulationWithMatchingRequest): Promise<SimulationWithMatchingResponse> => {
+    const { data } = await api.post('/api/scenarios/run-with-matching', request)
+    return data
+  },
+}
+
+// ===================
+// COVERAGE & BEST COMBO
+// ===================
+export interface LabRecoveryInfo {
+  lab_id: number
+  lab_nom: string
+  chiffre_recupere_ht: number
+  montant_remise_estime: number
+  couverture_additionnelle_pct: number
+  nb_produits_recuperes: number
+  remise_negociee?: number
+}
+
+export interface BestComboResult {
+  labs: Laboratoire[]
+  couverture_totale_pct: number
+  chiffre_total_realisable_ht: number
+  montant_remise_total: number
+}
+
+export interface BestComboResponse {
+  labo_principal: Laboratoire
+  chiffre_perdu_ht: number
+  nb_produits_perdus: number
+  recommendations: LabRecoveryInfo[]
+  best_combo?: BestComboResult
+}
+
+export interface CoverageGap {
+  vente_id: number
+  designation: string
+  code_cip?: string
+  montant_annuel: number
+  quantite_annuelle?: number
+  alternatives: Array<{
+    labo_id: number
+    labo_nom: string
+    produit_id: number
+    produit_nom: string
+    match_score: number
+    remise_negociee: number
+  }>
+}
+
+export interface CoverageGapsResponse {
+  labo_id: number
+  labo_nom: string
+  nb_produits_manquants: number
+  total_montant_manquant_ht: number
+  produits_avec_alternative: number
+  produits_sans_alternative: number
+  gaps: CoverageGap[]
+}
+
+export interface CoverageMatrixResponse {
+  import_id: number
+  total_ventes: number
+  total_montant_ht: number
+  individual_stats: Array<{
+    labo_id: number
+    labo_nom: string
+    nb_matches: number
+    couverture_count_pct: number
+    montant_couvert_ht: number
+    couverture_montant_pct: number
+  }>
+  combo_matrix: Array<{
+    labo1_id: number
+    labo1_nom: string
+    labo2_id: number
+    labo2_nom: string
+    couverture_combo_pct: number
+    overlap_count: number
+    unique_labo1: number
+    unique_labo2: number
+    total_combo: number
+  }>
+}
+
+export const coverageApi = {
+  getBestCombo: async (laboPrincipalId: number, importId: number): Promise<BestComboResponse> => {
+    const { data } = await api.get(`/api/coverage/best-combo/${laboPrincipalId}`, {
+      params: { import_id: importId },
+    })
+    return data
+  },
+
+  getGaps: async (laboId: number, importId: number, limit?: number): Promise<CoverageGapsResponse> => {
+    const { data } = await api.get(`/api/coverage/gaps/${laboId}`, {
+      params: { import_id: importId, limit: limit || 50 },
+    })
+    return data
+  },
+
+  getMatrix: async (importId: number): Promise<CoverageMatrixResponse> => {
+    const { data } = await api.get('/api/coverage/matrix', {
+      params: { import_id: importId },
+    })
+    return data
+  },
+}
+
+// ===================
+// REPORTS
+// ===================
+export const reportsApi = {
+  downloadSimulationPDF: async (
+    importId: number,
+    laboPrincipalId: number,
+    pharmacieNom?: string
+  ): Promise<Blob> => {
+    const { data } = await api.get('/api/reports/simulation/pdf', {
+      params: {
+        import_id: importId,
+        labo_principal_id: laboPrincipalId,
+        pharmacie_nom: pharmacieNom || 'Ma Pharmacie',
+      },
+      responseType: 'blob',
+    })
     return data
   },
 }
