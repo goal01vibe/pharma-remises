@@ -78,6 +78,15 @@ class CatalogueProduit(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+    # Colonnes BDPM
+    source = Column(String(20), default='bdpm', index=True)  # 'bdpm' ou 'manuel'
+    groupe_generique_id = Column(Integer, nullable=True, index=True)  # ID groupe BDPM
+    libelle_groupe = Column(String(300), nullable=True)  # Libelle du groupe generique
+    conditionnement = Column(Integer, nullable=True)  # ex: 30, 90
+    type_generique = Column(String(20), nullable=True)  # 'princeps', 'generique', 'complementaire'
+    prix_fabricant = Column(Numeric(10, 2), nullable=True)  # Prix HT fabricant BDPM
+    code_cis = Column(String(20), nullable=True)  # Code CIS pour le croisement
+
     # Relations
     laboratoire = relationship("Laboratoire", back_populates="catalogue")
     presentation = relationship("Presentation", back_populates="produits")
@@ -209,6 +218,40 @@ class ResultatSimulation(Base):
     scenario = relationship("Scenario", back_populates="resultats")
     presentation = relationship("Presentation", back_populates="resultats")
     produit = relationship("CatalogueProduit", back_populates="resultats")
+
+
+class VenteMatching(Base):
+    """Table de mapping ventes -> produits catalogue par labo.
+
+    Stocke les resultats du matching intelligent:
+    - Pour chaque vente importee, on stocke le produit equivalent trouve
+      dans chaque laboratoire cible.
+    - Permet de simuler rapidement sans recalculer le matching.
+    """
+    __tablename__ = "vente_matching"
+    __table_args__ = (
+        UniqueConstraint("vente_id", "labo_id", name="uq_vente_labo"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    vente_id = Column(Integer, ForeignKey("mes_ventes.id", ondelete="CASCADE"), nullable=False, index=True)
+    labo_id = Column(Integer, ForeignKey("laboratoires.id", ondelete="CASCADE"), nullable=False, index=True)
+    produit_id = Column(Integer, ForeignKey("catalogue_produits.id", ondelete="SET NULL"), nullable=True)
+
+    # Score et type de matching
+    match_score = Column(Numeric(5, 2), nullable=True)  # Score 0-100
+    match_type = Column(String(30), nullable=True)  # 'exact_cip', 'groupe_generique', 'fuzzy_molecule', 'fuzzy_commercial'
+
+    # Infos complementaires pour debug/audit
+    matched_on = Column(String(200), nullable=True)  # Valeur qui a matche (CIP, groupe, etc.)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Relations
+    vente = relationship("MesVentes", backref="matchings")
+    laboratoire = relationship("Laboratoire", backref="vente_matchings")
+    produit = relationship("CatalogueProduit", backref="vente_matchings")
 
 
 class Parametre(Base):

@@ -1,6 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+
+# Charger les variables d'environnement depuis .env (racine du projet)
+load_dotenv(dotenv_path="../.env")
 
 from app.db import engine, Base
 from app.api import (
@@ -11,6 +15,9 @@ from app.api import (
     simulations_router,
     import_router,
     parametres_router,
+    matching_router,
+    coverage_router,
+    reports_router,
 )
 
 
@@ -33,7 +40,7 @@ app = FastAPI(
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5174", "http://localhost:5173", "http://127.0.0.1:5174"],
+    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://localhost:5175", "http://127.0.0.1:5174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -47,6 +54,9 @@ app.include_router(ventes_router)
 app.include_router(simulations_router)
 app.include_router(import_router)
 app.include_router(parametres_router)
+app.include_router(matching_router)
+app.include_router(coverage_router)
+app.include_router(reports_router)
 
 
 @app.get("/")
@@ -57,3 +67,4 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+# reload

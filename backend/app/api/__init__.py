@@ -5,6 +5,9 @@ from .ventes import router as ventes_router
 from .simulations import router as simulations_router
 from .import_data import router as import_router
 from .parametres import router as parametres_router
+from .matching import router as matching_router
+from .coverage import router as coverage_router
+from .reports import router as reports_router
 
 __all__ = [
     "laboratoires_router",
@@ -14,4 +17,7 @@ __all__ = [
     "simulations_router",
     "import_router",
     "parametres_router",
+    "matching_router",
+    "coverage_router",
+    "reports_router",
 ]

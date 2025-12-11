@@ -4,7 +4,10 @@ from typing import List
 from decimal import Decimal
 
 from app.db import get_db
-from app.models import Scenario, ResultatSimulation, MesVentes, CatalogueProduit, Laboratoire
+from app.models import (
+    Scenario, ResultatSimulation, MesVentes, CatalogueProduit,
+    Laboratoire, VenteMatching, Import, RegleRemontee, RegleRemonteeProduit
+)
 from app.schemas import (
     ScenarioCreate,
     ScenarioResponse,
@@ -12,6 +15,10 @@ from app.schemas import (
     TotauxSimulation,
     ComparaisonScenarios,
     ScenarioTotaux,
+    SimulationWithMatchingRequest,
+    SimulationWithMatchingResponse,
+    SimulationLineResult,
+    LaboratoireResponse,
 )
 from app.services.simulation import run_simulation, calculate_totaux
 
@@ -160,4 +167,256 @@ def compare_scenarios(scenario_ids: List[int], db: Session = Depends(get_db)):
         scenarios=scenarios_data,
         gagnant_id=gagnant.scenario.id,
         ecart_gain=ecart,
+    )
+
+
+# =====================
+# SIMULATION AVEC MATCHING INTELLIGENT
+# =====================
+
+@router.post("/run-with-matching", response_model=SimulationWithMatchingResponse)
+def run_simulation_with_matching(
+    request: SimulationWithMatchingRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Execute une simulation en utilisant le matching intelligent.
+
+    Utilise la table vente_matching pour trouver les produits equivalents
+    au lieu de presentation_id.
+
+    Calcule:
+    - Remise facture (remise_pct du produit)
+    - Remontee (complement vers remise_negociee, apres exclusions)
+
+    Args:
+        request: import_id, labo_principal_id, optionnel remise_negociee
+
+    Returns:
+        Totaux + details par ligne avec info matching
+    """
+    # Verifier l'import
+    import_obj = db.query(Import).filter(Import.id == request.import_id).first()
+    if not import_obj:
+        raise HTTPException(status_code=404, detail="Import non trouve")
+
+    # Verifier le labo
+    labo = db.query(Laboratoire).filter(Laboratoire.id == request.labo_principal_id).first()
+    if not labo:
+        raise HTTPException(status_code=404, detail="Laboratoire non trouve")
+
+    # Remise negociee (override ou celle du labo)
+    remise_negociee = request.remise_negociee if request.remise_negociee is not None else labo.remise_negociee
+    if remise_negociee is None:
+        remise_negociee = Decimal("0")
+
+    # Recuperer les ventes
+    ventes = db.query(MesVentes).filter(MesVentes.import_id == request.import_id).all()
+    if not ventes:
+        raise HTTPException(status_code=404, detail="Aucune vente trouvee")
+
+    vente_ids = [v.id for v in ventes]
+
+    # Recuperer les matchings pour ce labo
+    matchings = db.query(VenteMatching).filter(
+        VenteMatching.vente_id.in_(vente_ids),
+        VenteMatching.labo_id == request.labo_principal_id
+    ).all()
+
+    if not matchings:
+        raise HTTPException(
+            status_code=400,
+            detail="Matching non effectue. Lancez d'abord POST /api/matching/process-sales"
+        )
+
+    matching_map = {m.vente_id: m for m in matchings}
+
+    # Recuperer les exclusions pour ce labo
+    exclusions_query = (
+        db.query(RegleRemonteeProduit.produit_id, RegleRemontee.remontee_pct)
+        .join(RegleRemontee)
+        .filter(RegleRemontee.laboratoire_id == request.labo_principal_id)
+        .all()
+    )
+    # Map produit_id -> remontee_pct de la regle (0 = exclu, X = partiel)
+    exclusion_map = {p_id: r_pct for p_id, r_pct in exclusions_query}
+
+    # Calculer pour chaque vente
+    details = []
+    totaux_data = {
+        "chiffre_total_ht": Decimal("0"),
+        "chiffre_realisable_ht": Decimal("0"),
+        "chiffre_perdu_ht": Decimal("0"),
+        "chiffre_eligible_remontee_ht": Decimal("0"),
+        "chiffre_exclu_remontee_ht": Decimal("0"),
+        "total_remise_ligne": Decimal("0"),
+        "total_remontee": Decimal("0"),
+        "total_remise_globale": Decimal("0"),
+        "nb_produits_total": 0,
+        "nb_produits_disponibles": 0,
+        "nb_produits_manquants": 0,
+        "nb_produits_exclus": 0,
+        "nb_produits_eligibles": 0,
+    }
+
+    matching_stats = {
+        "exact_cip": 0,
+        "groupe_generique": 0,
+        "fuzzy_molecule": 0,
+        "fuzzy_commercial": 0,
+        "no_match": 0,
+        "avg_score": []
+    }
+
+    for vente in ventes:
+        montant_ht = vente.montant_annuel or Decimal("0")
+        quantite = vente.quantite_annuelle or 0
+        totaux_data["chiffre_total_ht"] += montant_ht
+        totaux_data["nb_produits_total"] += 1
+
+        matching = matching_map.get(vente.id)
+        produit = None
+        disponible = False
+        match_score = None
+        match_type = None
+
+        if matching and matching.produit_id:
+            produit = db.query(CatalogueProduit).filter(
+                CatalogueProduit.id == matching.produit_id
+            ).first()
+            disponible = produit is not None
+            match_score = float(matching.match_score or 0)
+            match_type = matching.match_type
+            matching_stats["avg_score"].append(match_score)
+            if match_type:
+                matching_stats[match_type] = matching_stats.get(match_type, 0) + 1
+
+        if not disponible:
+            matching_stats["no_match"] += 1
+
+        # Calcul des remises
+        remise_ligne_pct = Decimal("0")
+        montant_remise_ligne = Decimal("0")
+        statut_remontee = "indisponible"
+        remontee_cible = Decimal("0")
+        montant_remontee = Decimal("0")
+        remise_totale_pct = Decimal("0")
+        montant_total_remise = Decimal("0")
+
+        if disponible and produit:
+            totaux_data["chiffre_realisable_ht"] += montant_ht
+            totaux_data["nb_produits_disponibles"] += 1
+
+            # Remise ligne (du catalogue produit)
+            remise_ligne_pct = produit.remise_pct or Decimal("0")
+            montant_remise_ligne = montant_ht * remise_ligne_pct / 100
+            totaux_data["total_remise_ligne"] += montant_remise_ligne
+
+            # Determiner statut remontee
+            # Priorite: exclusion via regle > remontee_pct du produit > normal
+            if produit.id in exclusion_map:
+                r_pct = exclusion_map[produit.id]
+                if r_pct == 0:
+                    statut_remontee = "exclu"
+                    totaux_data["nb_produits_exclus"] += 1
+                    totaux_data["chiffre_exclu_remontee_ht"] += montant_ht
+                else:
+                    statut_remontee = "partiel"
+                    remontee_cible = r_pct
+            elif produit.remontee_pct is not None:
+                if produit.remontee_pct == 0:
+                    statut_remontee = "exclu"
+                    totaux_data["nb_produits_exclus"] += 1
+                    totaux_data["chiffre_exclu_remontee_ht"] += montant_ht
+                else:
+                    statut_remontee = "partiel"
+                    remontee_cible = produit.remontee_pct
+            else:
+                statut_remontee = "normal"
+                remontee_cible = remise_negociee
+                totaux_data["nb_produits_eligibles"] += 1
+                totaux_data["chiffre_eligible_remontee_ht"] += montant_ht
+
+            # Calculer montant remontee si applicable
+            if statut_remontee in ("normal", "partiel"):
+                # Complement = (cible - remise_ligne) * montant
+                # Seulement si cible > remise_ligne
+                if remontee_cible > remise_ligne_pct:
+                    complement_pct = remontee_cible - remise_ligne_pct
+                    montant_remontee = montant_ht * complement_pct / 100
+                    totaux_data["total_remontee"] += montant_remontee
+
+            # Remise totale
+            remise_totale_pct = remise_ligne_pct + (remontee_cible - remise_ligne_pct if remontee_cible > remise_ligne_pct else Decimal("0"))
+            if statut_remontee == "exclu":
+                remise_totale_pct = remise_ligne_pct  # Pas de remontee
+            montant_total_remise = montant_remise_ligne + montant_remontee
+            totaux_data["total_remise_globale"] += montant_total_remise
+
+        else:
+            # Non disponible
+            totaux_data["chiffre_perdu_ht"] += montant_ht
+            totaux_data["nb_produits_manquants"] += 1
+
+        details.append(SimulationLineResult(
+            vente_id=vente.id,
+            designation=vente.designation or "",
+            quantite=quantite,
+            montant_ht=montant_ht,
+            produit_id=produit.id if produit else None,
+            produit_nom=produit.nom_commercial if produit else None,
+            disponible=disponible,
+            match_score=match_score,
+            match_type=match_type,
+            remise_ligne_pct=remise_ligne_pct,
+            montant_remise_ligne=montant_remise_ligne,
+            statut_remontee=statut_remontee,
+            remontee_cible=remontee_cible,
+            montant_remontee=montant_remontee,
+            remise_totale_pct=remise_totale_pct,
+            montant_total_remise=montant_total_remise
+        ))
+
+    # Calculer moyennes et pourcentages
+    taux_couverture = Decimal("0")
+    if totaux_data["chiffre_total_ht"] > 0:
+        taux_couverture = totaux_data["chiffre_realisable_ht"] / totaux_data["chiffre_total_ht"] * 100
+
+    remise_ligne_moyenne = Decimal("0")
+    if totaux_data["chiffre_realisable_ht"] > 0:
+        remise_ligne_moyenne = totaux_data["total_remise_ligne"] / totaux_data["chiffre_realisable_ht"] * 100
+
+    remise_totale_ponderee = Decimal("0")
+    if totaux_data["chiffre_realisable_ht"] > 0:
+        remise_totale_ponderee = totaux_data["total_remise_globale"] / totaux_data["chiffre_realisable_ht"] * 100
+
+    # Construire TotauxSimulation
+    totaux = TotauxSimulation(
+        chiffre_total_ht=totaux_data["chiffre_total_ht"],
+        chiffre_realisable_ht=totaux_data["chiffre_realisable_ht"],
+        chiffre_perdu_ht=totaux_data["chiffre_perdu_ht"],
+        chiffre_eligible_remontee_ht=totaux_data["chiffre_eligible_remontee_ht"],
+        chiffre_exclu_remontee_ht=totaux_data["chiffre_exclu_remontee_ht"],
+        total_remise_ligne=totaux_data["total_remise_ligne"],
+        total_remontee=totaux_data["total_remontee"],
+        total_remise_globale=totaux_data["total_remise_globale"],
+        taux_couverture=round(taux_couverture, 2),
+        remise_ligne_moyenne=round(remise_ligne_moyenne, 2),
+        remise_totale_ponderee=round(remise_totale_ponderee, 2),
+        nb_produits_total=totaux_data["nb_produits_total"],
+        nb_produits_disponibles=totaux_data["nb_produits_disponibles"],
+        nb_produits_manquants=totaux_data["nb_produits_manquants"],
+        nb_produits_exclus=totaux_data["nb_produits_exclus"],
+        nb_produits_eligibles=totaux_data["nb_produits_eligibles"],
+    )
+
+    # Stats matching
+    avg_score = sum(matching_stats["avg_score"]) / len(matching_stats["avg_score"]) if matching_stats["avg_score"] else 0
+    matching_stats["avg_score"] = round(avg_score, 1)
+
+    return SimulationWithMatchingResponse(
+        labo=LaboratoireResponse.model_validate(labo),
+        totaux=totaux,
+        details=details,
+        matching_stats=matching_stats
     )
