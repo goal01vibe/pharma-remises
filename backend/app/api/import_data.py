@@ -81,6 +81,7 @@ async def import_catalogue(
                         nom_commercial=designation if designation else None,
                         prix_ht=prix_ht if prix_ht else None,
                         remise_pct=remise_pct if remise_pct else None,
+                        source='manuel',  # Marquer comme import manuel
                     )
                     db.add(produit)
                     nb_imported += 1
@@ -220,6 +221,7 @@ async def extract_pdf(
         nb_pages_traitees=result["nb_pages"],
         modele_utilise=result["modele"],
         temps_extraction_s=round(elapsed, 2),
+        raw_response=result.get("raw_response"),
     )
 
 
@@ -230,3 +232,110 @@ def get_import_status(import_id: int, db: Session = Depends(get_db)):
     if not db_import:
         raise HTTPException(status_code=404, detail="Import non trouve")
     return db_import
+
+
+# ============== ENDPOINTS BDPM ==============
+
+from app.services.bdpm_import import import_all_bdpm, import_target_labs, detect_duplicates, get_labo_stats
+
+
+@router.post("/bdpm/import-all")
+async def bdpm_import_all(db: Session = Depends(get_db)):
+    """
+    Import tous les labos generiques depuis fichiers BDPM.
+
+    Cree les labos qui n'existent pas et enrichit les existants.
+    Les produits existants (manuels) ne sont pas ecrases.
+    """
+    result = import_all_bdpm(db, only_generiques=True)
+
+    return {
+        "success": True,
+        "labos_crees": result.labos_crees,
+        "labos_enrichis": result.labos_enrichis,
+        "produits_importes": result.produits_importes,
+        "produits_ignores": result.produits_ignores,
+        "erreurs": result.erreurs,
+        "labos_liste": result.labos_liste[:20],  # Limiter pour la reponse
+        "total_labos": len(result.labos_liste)
+    }
+
+
+@router.post("/bdpm/import-target-labs")
+async def bdpm_import_target_labs(db: Session = Depends(get_db)):
+    """
+    Import des 5 labos cibles (BIOGARAN, SANDOZ, ARROW, ZENTIVA, VIATRIS).
+
+    ATTENTION: PURGE la DB et reimporte avec la nouvelle logique:
+    - Attribution par pattern de nom (pas titulaire AMM)
+    - Generiques seulement (pas de princeps)
+    - Produits rembourses seulement
+    - Produits commercialises seulement
+    """
+    result = import_target_labs(db)
+
+    return {
+        "success": len(result.erreurs) == 0,
+        "labos_crees": result.labos_crees,
+        "produits_importes": result.produits_importes,
+        "erreurs": result.erreurs,
+        "labos_liste": result.labos_liste
+    }
+
+
+@router.get("/bdpm/doublons/{labo_id}")
+def bdpm_get_doublons(labo_id: int, db: Session = Depends(get_db)):
+    """
+    Retourne les doublons potentiels entre produits manuels et BDPM pour un labo.
+    """
+    # Verifier le labo
+    labo = db.query(Laboratoire).filter(Laboratoire.id == labo_id).first()
+    if not labo:
+        raise HTTPException(status_code=404, detail="Laboratoire non trouve")
+
+    doublons = detect_duplicates(db, labo_id)
+
+    return {
+        "labo_id": labo_id,
+        "labo_nom": labo.nom,
+        "nb_doublons": len(doublons),
+        "doublons": doublons
+    }
+
+
+@router.get("/bdpm/stats")
+def bdpm_stats(db: Session = Depends(get_db)):
+    """
+    Retourne les stats par labo (nb produits total, manuels, bdpm).
+    """
+    stats = get_labo_stats(db)
+    return {
+        "total_labos": len(stats),
+        "labos": stats
+    }
+
+
+@router.post("/bdpm/mark-manual/{labo_id}")
+def bdpm_mark_manual(labo_id: int, db: Session = Depends(get_db)):
+    """
+    Marque tous les produits existants d'un labo comme 'manuel'.
+    Utile pour preparer un labo avant enrichissement BDPM.
+    """
+    labo = db.query(Laboratoire).filter(Laboratoire.id == labo_id).first()
+    if not labo:
+        raise HTTPException(status_code=404, detail="Laboratoire non trouve")
+
+    # Mettre a jour les produits sans source definie
+    updated = db.query(CatalogueProduit).filter(
+        CatalogueProduit.laboratoire_id == labo_id,
+        (CatalogueProduit.source == None) | (CatalogueProduit.source == 'bdpm')
+    ).update({CatalogueProduit.source: 'manuel'}, synchronize_session=False)
+
+    db.commit()
+
+    return {
+        "success": True,
+        "labo_id": labo_id,
+        "labo_nom": labo.nom,
+        "produits_marques": updated
+    }
