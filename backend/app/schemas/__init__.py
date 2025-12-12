@@ -34,9 +34,28 @@ from .schemas import (
     # Parametres
     ParametreResponse,
     ParametreUpdate,
-    # Matching
+    # Matching (Legacy)
     MatchCandidat,
     MatchingResult,
+    # Matching Intelligent
+    MatchResultItem,
+    VenteMatchingItem,
+    ProcessSalesRequest,
+    ProcessSalesResponse,
+    LabMatchingSummary,
+    AnalyzeMatchRequest,
+    AnalyzeMatchResponse,
+    ExtractedComponents,
+    # Simulation avec Matching
+    SimulationWithMatchingRequest,
+    SimulationWithMatchingResponse,
+    SimulationLineResult,
+    # Coverage & Combo
+    LabRecoveryInfo,
+    BestComboResult,
+    BestComboResponse,
+    # Reports
+    ReportRequest,
 )
 
 __all__ = [
@@ -68,4 +87,19 @@ __all__ = [
     "ParametreUpdate",
     "MatchCandidat",
     "MatchingResult",
+    "MatchResultItem",
+    "VenteMatchingItem",
+    "ProcessSalesRequest",
+    "ProcessSalesResponse",
+    "LabMatchingSummary",
+    "AnalyzeMatchRequest",
+    "AnalyzeMatchResponse",
+    "ExtractedComponents",
+    "SimulationWithMatchingRequest",
+    "SimulationWithMatchingResponse",
+    "SimulationLineResult",
+    "LabRecoveryInfo",
+    "BestComboResult",
+    "BestComboResponse",
+    "ReportRequest",
 ]

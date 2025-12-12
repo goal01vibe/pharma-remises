@@ -152,6 +152,7 @@ class Import(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     type_import = Column(String(50), nullable=False)  # 'catalogue' ou 'ventes'
+    nom = Column(String(200), nullable=True)  # Nom personnalise de l'import
     nom_fichier = Column(String(200), nullable=True)
     laboratoire_id = Column(Integer, ForeignKey("laboratoires.id"), nullable=True)
     nb_lignes_importees = Column(Integer, nullable=True)
@@ -262,3 +263,19 @@ class Parametre(Base):
     valeur = Column(Text, nullable=True)
     description = Column(Text, nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class BdpmEquivalence(Base):
+    """Table du referentiel BDPM pour lookup groupe_generique_id.
+
+    Permet de trouver le groupe generique d'un CIP13 meme si le labo
+    n'est pas dans le systeme (TEVA, EG, BIOGARAN non importes, etc.)
+    """
+    __tablename__ = "bdpm_equivalences"
+
+    cip13 = Column(String(13), primary_key=True, index=True)  # Code CIP13
+    cis = Column(String(20), nullable=True, index=True)  # Code CIS (identifiant specialite)
+    groupe_generique_id = Column(Integer, nullable=True, index=True)  # ID du groupe generique
+    libelle_groupe = Column(String(500), nullable=True)  # "AMOXICILLINE + ACIDE CLAVULANIQUE 100mg..."
+    type_generique = Column(Integer, nullable=True)  # 0=princeps, 1=generique
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

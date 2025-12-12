@@ -1,10 +1,12 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Loader2 } from 'lucide-react'
 import {
   Table,
   TableBody,
@@ -150,7 +152,7 @@ export function SimulationIntelligente() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-bold">Simulation Intelligente</h1>
+          <h1 className="text-2xl font-bold">Simulations Scenarios</h1>
           <p className="text-muted-foreground">
             Matching automatique + Simulation + Meilleure combo
           </p>
@@ -235,6 +237,24 @@ export function SimulationIntelligente() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* Overlay de chargement pendant le matching */}
+              {processMatchingMutation.isPending && (
+                <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center">
+                  <Card className="p-8 flex flex-col items-center gap-4 shadow-lg">
+                    <Loader2 className="h-12 w-12 animate-spin text-primary" />
+                    <div className="text-center">
+                      <p className="text-lg font-medium">Matching en cours...</p>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        Import #{selectedImportId} - Analyse des {ventesImports.find(i => i.id === selectedImportId)?.nb_lignes_importees || '?'} ventes
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-2">
+                        Cela peut prendre 10-15 secondes
+                      </p>
+                    </div>
+                  </Card>
+                </div>
+              )}
+
               {matchingStats?.matching_done ? (
                 <div className="space-y-4">
                   <div className="flex items-center gap-2">
@@ -246,16 +266,25 @@ export function SimulationIntelligente() {
 
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
                     {matchingStats.by_lab?.map((lab) => (
-                      <Card key={lab.lab_id} className="p-4">
-                        <div className="font-medium">{lab.lab_nom}</div>
-                        <div className="text-2xl font-bold text-primary">
-                          {formatPct(lab.couverture_montant_pct)}
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          {lab.matched_count} produits
-                        </div>
-                        <Progress value={lab.couverture_montant_pct} className="mt-2 h-2" />
-                      </Card>
+                      <Link
+                        key={lab.lab_id}
+                        to={`/matching-details/${selectedImportId}/${lab.lab_id}`}
+                        className="block"
+                      >
+                        <Card className="p-4 hover:border-primary hover:shadow-md transition-all cursor-pointer">
+                          <div className="font-medium">{lab.lab_nom}</div>
+                          <div className="text-2xl font-bold text-primary">
+                            {formatPct(lab.couverture_count_pct)}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {lab.matched_count} produits matchés
+                          </div>
+                          <Progress value={lab.couverture_count_pct} className="mt-2 h-2" />
+                          <div className="text-xs text-primary mt-2 opacity-0 group-hover:opacity-100">
+                            Voir details →
+                          </div>
+                        </Card>
+                      </Link>
                     ))}
                   </div>
 
@@ -264,6 +293,7 @@ export function SimulationIntelligente() {
                     onClick={handleProcessMatching}
                     disabled={processMatchingMutation.isPending}
                   >
+                    <Loader2 className={`mr-2 h-4 w-4 ${processMatchingMutation.isPending ? 'animate-spin' : 'hidden'}`} />
                     Relancer le matching
                   </Button>
                 </div>
@@ -275,8 +305,10 @@ export function SimulationIntelligente() {
                   <Button
                     onClick={handleProcessMatching}
                     disabled={!selectedImportId || processMatchingMutation.isPending}
+                    size="lg"
                   >
-                    {processMatchingMutation.isPending ? 'Matching en cours...' : 'Lancer le matching'}
+                    <Loader2 className={`mr-2 h-4 w-4 ${processMatchingMutation.isPending ? 'animate-spin' : 'hidden'}`} />
+                    Lancer le matching
                   </Button>
                 </div>
               )}

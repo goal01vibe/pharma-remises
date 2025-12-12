@@ -22,7 +22,7 @@ import type {
   CatalogueComparison,
 } from '@/types'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8003'
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8847'
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -181,9 +181,12 @@ export const importApi = {
     return data
   },
 
-  importVentes: async (file: File): Promise<Import> => {
+  importVentes: async (file: File, nom?: string): Promise<Import> => {
     const formData = new FormData()
     formData.append('file', file)
+    if (nom) {
+      formData.append('nom', nom)
+    }
     const { data } = await api.post('/api/import/ventes', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
@@ -222,8 +225,16 @@ export const ventesApi = {
   },
 
   getImports: async (): Promise<Import[]> => {
-    const { data } = await api.get('/api/import/ventes')
+    const { data } = await api.get('/api/ventes/imports')
     return data
+  },
+
+  deleteImport: async (importId: number): Promise<void> => {
+    await api.delete(`/api/import/ventes/${importId}`)
+  },
+
+  deleteVente: async (venteId: number): Promise<void> => {
+    await api.delete(`/api/ventes/${venteId}`)
   },
 }
 
@@ -389,6 +400,57 @@ export interface MatchingStatsResponse {
   }>
 }
 
+// Types pour les details de matching
+export interface MatchingDetailItem {
+  vente_id: number
+  matched: boolean
+  // Infos vente
+  vente_designation: string | null
+  vente_code_cip: string | null
+  vente_quantite: number | null
+  vente_labo_actuel: string | null
+  // Infos produit matche
+  produit_id: number | null
+  produit_nom: string | null
+  produit_code_cip: string | null
+  produit_prix_ht: number | null
+  produit_remise_pct: number | null
+  produit_groupe_generique_id: number | null
+  produit_libelle_groupe: string | null
+  // Infos matching
+  match_score: number | null
+  match_type: string | null
+  matched_on: string | null
+}
+
+export interface MatchingDetailsResponse {
+  import_id: number
+  labo_id: number
+  labo_nom: string
+  total_ventes: number
+  matched_count: number
+  unmatched_count: number
+  couverture_pct: number
+  details: MatchingDetailItem[]
+}
+
+export interface SearchProductResult {
+  id: number
+  nom_commercial: string | null
+  code_cip: string | null
+  prix_ht: number | null
+  remise_pct: number | null
+  groupe_generique_id: number | null
+  libelle_groupe: string | null
+}
+
+export interface SearchProductsResponse {
+  labo_id: number
+  labo_nom: string
+  query: string
+  results: SearchProductResult[]
+}
+
 export const intelligentMatchingApi = {
   processSales: async (request: ProcessSalesRequest): Promise<ProcessSalesResponse> => {
     const { data } = await api.post('/api/matching/process-sales', request)
@@ -407,6 +469,34 @@ export const intelligentMatchingApi = {
 
   clear: async (importId: number): Promise<{ deleted: number }> => {
     const { data } = await api.delete(`/api/matching/clear/${importId}`)
+    return data
+  },
+
+  // Details du matching pour un import et un labo
+  getDetails: async (importId: number, laboId: number): Promise<MatchingDetailsResponse> => {
+    const { data } = await api.get(`/api/matching/details/${importId}/${laboId}`)
+    return data
+  },
+
+  // Recherche de produits dans un labo
+  searchProducts: async (laboId: number, query: string): Promise<SearchProductsResponse> => {
+    const { data } = await api.get(`/api/matching/search-products/${laboId}`, {
+      params: { q: query },
+    })
+    return data
+  },
+
+  // Correction manuelle d'un matching
+  setManualMatch: async (venteId: number, laboId: number, produitId: number): Promise<{ success: boolean; message: string }> => {
+    const { data } = await api.put(`/api/matching/manual/${venteId}/${laboId}`, null, {
+      params: { produit_id: produitId },
+    })
+    return data
+  },
+
+  // Supprimer un matching
+  deleteMatch: async (venteId: number, laboId: number): Promise<{ success: boolean; deleted: number }> => {
+    const { data } = await api.delete(`/api/matching/manual/${venteId}/${laboId}`)
     return data
   },
 }
@@ -584,3 +674,84 @@ export const reportsApi = {
 }
 
 export default api
+
+// ===================
+// IMPORT AVEC RAPPROCHEMENT
+// ===================
+export interface ImportPreviewChange {
+  champ: string
+  ancien: number | null
+  nouveau: number | null
+}
+
+export interface ImportPreviewItem {
+  ligne: number
+  code_cip: string | null
+  designation: string | null
+  prix_ht_import: number | null
+  remise_pct_import: number | null
+  match_type: string
+  match_score: number
+  produit_id?: number
+  nom_existant?: string
+  code_cip_existant?: string
+  prix_ht_existant?: number | null
+  remise_pct_existant?: number | null
+  changes?: ImportPreviewChange[]
+}
+
+export interface ImportPreviewResponse {
+  preview_id: string
+  laboratoire: {
+    id: number
+    nom: string
+  }
+  colonnes_detectees: Record<string, string>
+  total_lignes_fichier: number
+  total_produits_existants: number
+  resume: {
+    nouveaux: number
+    mis_a_jour: number
+    inchanges: number
+    erreurs: number
+  }
+  nouveaux: ImportPreviewItem[]
+  mis_a_jour: ImportPreviewItem[]
+  inchanges: ImportPreviewItem[]
+  erreurs: Array<{ ligne: number; erreur: string }>
+}
+
+export interface ImportConfirmRequest {
+  apply_nouveaux?: boolean
+  apply_updates?: boolean
+  update_ids?: number[]
+}
+
+export interface ImportConfirmResponse {
+  success: boolean
+  laboratoire_id: number
+  produits_crees: number
+  produits_maj: number
+  message: string
+}
+
+export const importRapprochementApi = {
+  preview: async (file: File, laboId: number): Promise<ImportPreviewResponse> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('laboratoire_id', laboId.toString())
+    const { data } = await api.post('/api/import/catalogue/preview', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    return data
+  },
+
+  confirm: async (previewId: string, actions?: ImportConfirmRequest): Promise<ImportConfirmResponse> => {
+    const { data } = await api.post(`/api/import/catalogue/confirm/${previewId}`, actions || {})
+    return data
+  },
+
+  cancel: async (previewId: string): Promise<void> => {
+    await api.delete(`/api/import/catalogue/preview/${previewId}`)
+  },
+}

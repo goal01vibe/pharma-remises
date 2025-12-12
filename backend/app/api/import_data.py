@@ -105,14 +105,53 @@ async def import_catalogue(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/ventes/list", response_model=list[ImportResponse])
+def list_ventes_imports(db: Session = Depends(get_db)):
+    """Liste tous les imports de ventes."""
+    imports = db.query(Import).filter(Import.type_import == "ventes").order_by(Import.created_at.desc()).all()
+    return imports
+
+
+@router.delete("/ventes/cleanup-errors")
+def cleanup_errored_imports(db: Session = Depends(get_db)):
+    """Supprime tous les imports de ventes en erreur."""
+    # Supprimer les imports en erreur
+    deleted = db.query(Import).filter(
+        Import.type_import == "ventes",
+        Import.statut == "erreur"
+    ).delete()
+    db.commit()
+    return {"success": True, "deleted": deleted}
+
+
+@router.delete("/ventes/{import_id}")
+def delete_ventes_import(import_id: int, db: Session = Depends(get_db)):
+    """Supprime un import de ventes et toutes ses ventes associees."""
+    db_import = db.query(Import).filter(Import.id == import_id, Import.type_import == "ventes").first()
+    if not db_import:
+        raise HTTPException(status_code=404, detail="Import non trouve")
+
+    # Supprimer les ventes associees
+    db.query(MesVentes).filter(MesVentes.import_id == import_id).delete()
+    db.delete(db_import)
+    db.commit()
+
+    return {"success": True, "message": f"Import {import_id} supprime"}
+
+
 @router.post("/ventes", response_model=ImportResponse)
 async def import_ventes(
     file: UploadFile = File(...),
+    nom: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     """Importe les ventes depuis Excel/CSV."""
+    # Generer un nom par defaut si non fourni
+    import_nom = nom if nom else f"Import {file.filename}"
+
     db_import = Import(
         type_import="ventes",
+        nom=import_nom,
         nom_fichier=file.filename,
         statut="en_cours",
     )
@@ -122,24 +161,55 @@ async def import_ventes(
 
     try:
         content = await file.read()
-        if file.filename.endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(content))
+        if file.filename.lower().endswith(".csv"):
+            # Auto-detect encoding and separator
+            for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                try:
+                    content_str = content.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                content_str = content.decode('utf-8', errors='ignore')
+
+            first_line = content_str.split('\n')[0]
+            separator = ';' if ';' in first_line else ','
+            df = pd.read_csv(io.StringIO(content_str), sep=separator, quotechar='"', on_bad_lines='skip')
         else:
             df = pd.read_excel(io.BytesIO(content))
 
-        # Mapping colonnes ventes
+        # Normaliser les noms de colonnes (lowercase, sans accents, sans espaces)
+        import unicodedata
+        def normalize_col(col):
+            col = str(col).lower().strip()
+            col = unicodedata.normalize('NFD', col)
+            col = ''.join(c for c in col if unicodedata.category(c) != 'Mn')
+            col = col.replace(' ', '_').replace('-', '_')
+            return col
+
+        col_map_normalized = {normalize_col(c): c for c in df.columns}
+
+        # Mapping colonnes ventes avec variantes francaises
         column_mapping = {
-            "code_cip": ["code_cip", "cip", "code", "CIP"],
-            "designation": ["designation", "nom", "libelle", "produit"],
-            "quantite": ["quantite", "qte", "quantite_annuelle", "Quantite"],
-            "prix_unitaire": ["prix_unitaire", "prix", "PA", "Prix achat"],
-            "labo": ["labo", "laboratoire", "fournisseur"],
+            "code_cip": ["code_cip", "cip", "code", "codecip", "code_cip13", "cip13", "ean", "ean13"],
+            "designation": ["designation", "designation_produit", "nom", "libelle", "produit", "nom_produit", "libelle_produit", "article"],
+            "quantite": ["quantite", "qte", "qte_facturee", "quantite_annuelle", "quantite_facturee", "quantite_vendue", "nb", "nombre", "volume"],
+            "prix_unitaire": ["prix_unitaire", "prix", "pa", "prix_achat", "pu", "pht", "prix_ht", "prix_unitaire_ht"],
+            "labo": ["labo", "laboratoire", "fournisseur", "fabricant", "marque"],
         }
 
         def find_column(df, candidates):
-            for col in candidates:
-                if col in df.columns:
-                    return col
+            # Cherche d'abord dans les colonnes normalisees
+            for candidate in candidates:
+                norm_candidate = normalize_col(candidate)
+                if norm_candidate in col_map_normalized:
+                    return col_map_normalized[norm_candidate]
+            # Cherche aussi avec correspondance partielle
+            for candidate in candidates:
+                norm_candidate = normalize_col(candidate)
+                for norm_col, orig_col in col_map_normalized.items():
+                    if norm_candidate in norm_col or norm_col in norm_candidate:
+                        return orig_col
             return None
 
         mapped_cols = {}
@@ -339,3 +409,4 @@ def bdpm_mark_manual(labo_id: int, db: Session = Depends(get_db)):
         "labo_nom": labo.nom,
         "produits_marques": updated
     }
+# force reload 2024-12-12

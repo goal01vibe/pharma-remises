@@ -94,8 +94,8 @@ export function Laboratoires() {
     setEditingLabo(labo)
     setFormData({
       nom: labo.nom,
-      remise_negociee: labo.remise_negociee || 50,
-      remise_ligne_defaut: labo.remise_ligne_defaut || 35,
+      remise_negociee: labo.remise_negociee ?? 50,
+      remise_ligne_defaut: labo.remise_ligne_defaut ?? 35,
       actif: labo.actif,
       notes: labo.notes || '',
     })
@@ -167,10 +167,11 @@ export function Laboratoires() {
                       Remise negociee: {formData.remise_negociee}%
                     </Label>
                     <Slider
-                      value={[formData.remise_negociee || 50]}
+                      value={[formData.remise_negociee ?? 50]}
                       onValueChange={([value]) =>
                         setFormData({ ...formData, remise_negociee: value })
                       }
+                      min={0}
                       max={70}
                       step={0.5}
                     />
@@ -184,10 +185,11 @@ export function Laboratoires() {
                       Remise ligne par defaut: {formData.remise_ligne_defaut}%
                     </Label>
                     <Slider
-                      value={[formData.remise_ligne_defaut || 35]}
+                      value={[formData.remise_ligne_defaut ?? 35]}
                       onValueChange={([value]) =>
                         setFormData({ ...formData, remise_ligne_defaut: value })
                       }
+                      min={0}
                       max={60}
                       step={0.5}
                     />

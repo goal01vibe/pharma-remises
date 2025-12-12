@@ -63,6 +63,13 @@ export interface CatalogueProduit {
   actif: boolean
   created_at: string
   updated_at: string
+  // Champs BDPM
+  source: 'bdpm' | 'manuel' | null
+  groupe_generique_id: number | null
+  libelle_groupe: string | null
+  conditionnement: number | null
+  type_generique: 'princeps' | 'generique' | 'complementaire' | null
+  prix_fabricant: number | null
   // Relations
   presentation?: Presentation
   laboratoire?: Laboratoire
@@ -125,6 +132,7 @@ export interface MesVentes {
 export interface Import {
   id: number
   type_import: 'catalogue' | 'ventes'
+  nom: string | null
   nom_fichier: string
   laboratoire_id: number | null
   nb_lignes_importees: number | null
@@ -238,6 +246,7 @@ export interface ExtractionPDFResponse {
   nb_pages_traitees: number
   modele_utilise: string
   temps_extraction_s: number
+  raw_response: string | null  // Réponse brute de l'IA pour debug
 }
 
 // ===================
@@ -280,4 +289,27 @@ export interface PaginatedResponse<T> {
 export interface ApiError {
   detail: string
   status_code: number
+}
+
+// ===================
+// COMPARAISON CATALOGUES
+// ===================
+export interface LaboInfo {
+  id: number
+  nom: string
+  total_groupes: number
+  total_produits: number
+}
+
+export interface MoleculeSet {
+  count: number
+  molecules: string[]
+}
+
+export interface CatalogueComparison {
+  labo1: LaboInfo
+  labo2: LaboInfo
+  communes: MoleculeSet
+  only_labo1: MoleculeSet
+  only_labo2: MoleculeSet
 }

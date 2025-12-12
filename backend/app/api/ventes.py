@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
 
@@ -25,10 +25,24 @@ def list_ventes(
 
 @router.get("/imports", response_model=List[ImportResponse])
 def list_ventes_imports(db: Session = Depends(get_db)):
-    """Liste les imports de type ventes."""
+    """Liste les imports de type ventes reussis uniquement."""
     return (
         db.query(Import)
         .filter(Import.type_import == "ventes")
+        .filter(Import.statut == "termine")  # Seulement les imports reussis
         .order_by(Import.created_at.desc())
         .all()
     )
+
+
+@router.delete("/{vente_id}")
+def delete_vente(vente_id: int, db: Session = Depends(get_db)):
+    """Supprime une ligne de vente."""
+    vente = db.query(MesVentes).filter(MesVentes.id == vente_id).first()
+    if not vente:
+        raise HTTPException(status_code=404, detail="Vente non trouvee")
+
+    db.delete(vente)
+    db.commit()
+
+    return {"success": True, "message": f"Vente {vente_id} supprimee"}

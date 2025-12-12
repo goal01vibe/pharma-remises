@@ -10,6 +10,8 @@ from .models import (
     Scenario,
     ResultatSimulation,
     Parametre,
+    VenteMatching,
+    BdpmEquivalence,
 )
 
 __all__ = [
@@ -24,4 +26,6 @@ __all__ = [
     "Scenario",
     "ResultatSimulation",
     "Parametre",
+    "VenteMatching",
+    "BdpmEquivalence",
 ]

@@ -1,3 +1,4 @@
+import re
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
@@ -13,6 +14,31 @@ from app.schemas import (
 router = APIRouter(prefix="/api/catalogue", tags=["Catalogue"])
 
 
+def extract_molecule_name(libelle_groupe: str) -> str:
+    """
+    Extrait le nom de la molécule du libelle_groupe BDPM.
+    Format BDPM: "MOLECULE DOSAGE - PRINCEPS DOSAGE, forme"
+    Exemple: "RAMIPRIL 10 mg - TRIATEC 10 mg, comprimé" → "RAMIPRIL"
+    """
+    # Prendre la partie avant le tiret
+    part = libelle_groupe.split(' - ')[0].strip()
+
+    # Supprimer les dosages: X mg, X,X mg, X %, X microgrammes, etc.
+    part = re.sub(r'\s+\d+[\d,\.]*\s*(mg|g|ml|%|microgrammes?|ui|mmol)\b', '', part, flags=re.IGNORECASE)
+
+    # Supprimer les équivalences: "équivalant à ..."
+    part = re.sub(r'\s+équivalant\s+à\s+.*', '', part, flags=re.IGNORECASE)
+
+    # Supprimer les sels et formes chimiques entre parenthèses
+    # mais garder les associations comme "PARACETAMOL + CODEINE"
+    part = re.sub(r'\s*\([^)]*\)', '', part)
+
+    # Nettoyer les espaces multiples
+    part = re.sub(r'\s+', ' ', part).strip()
+
+    return part.upper()
+
+
 @router.get("", response_model=List[CatalogueProduitResponse])
 def list_catalogue(
     laboratoire_id: Optional[int] = Query(None),
@@ -25,6 +51,75 @@ def list_catalogue(
         query = query.filter(CatalogueProduit.laboratoire_id == laboratoire_id)
 
     return query.order_by(CatalogueProduit.nom_commercial).limit(1000).all()
+
+
+@router.get("/compare/{labo1_id}/{labo2_id}")
+def compare_catalogues(labo1_id: int, labo2_id: int, db: Session = Depends(get_db)):
+    """
+    Compare les catalogues de deux laboratoires par groupe générique BDPM.
+    Retourne les groupes communs, exclusifs à chaque labo.
+    """
+    from app.models import Laboratoire
+
+    # Vérifier que les labos existent
+    labo1 = db.query(Laboratoire).filter(Laboratoire.id == labo1_id).first()
+    labo2 = db.query(Laboratoire).filter(Laboratoire.id == labo2_id).first()
+
+    if not labo1 or not labo2:
+        raise HTTPException(status_code=404, detail="Laboratoire non trouvé")
+
+    # Récupérer les produits de chaque labo (seulement ceux avec groupe générique)
+    produits1 = db.query(CatalogueProduit).filter(
+        CatalogueProduit.laboratoire_id == labo1_id,
+        CatalogueProduit.groupe_generique_id.isnot(None)
+    ).all()
+    produits2 = db.query(CatalogueProduit).filter(
+        CatalogueProduit.laboratoire_id == labo2_id,
+        CatalogueProduit.groupe_generique_id.isnot(None)
+    ).all()
+
+    # Construire les dicts groupe_id -> libellé (prend le premier libellé trouvé)
+    groupes1 = {}
+    for p in produits1:
+        if p.groupe_generique_id not in groupes1:
+            # Extraire un libellé court: "MOLECULE DOSAGE" (avant le tiret)
+            libelle = p.libelle_groupe.split(' - ')[0].strip() if p.libelle_groupe else f"Groupe {p.groupe_generique_id}"
+            groupes1[p.groupe_generique_id] = libelle
+
+    groupes2 = {}
+    for p in produits2:
+        if p.groupe_generique_id not in groupes2:
+            libelle = p.libelle_groupe.split(' - ')[0].strip() if p.libelle_groupe else f"Groupe {p.groupe_generique_id}"
+            groupes2[p.groupe_generique_id] = libelle
+
+    set1 = set(groupes1.keys())
+    set2 = set(groupes2.keys())
+
+    # Calculer les différences
+    communs_ids = set1 & set2
+    only1_ids = set1 - set2
+    only2_ids = set2 - set1
+
+    # Convertir en libellés triés
+    def ids_to_libelles(ids, groupes_dict):
+        return sorted([groupes_dict[gid] for gid in ids])
+
+    return {
+        'labo1': {'id': labo1_id, 'nom': labo1.nom, 'total_groupes': len(set1), 'total_produits': len(produits1)},
+        'labo2': {'id': labo2_id, 'nom': labo2.nom, 'total_groupes': len(set2), 'total_produits': len(produits2)},
+        'communes': {
+            'count': len(communs_ids),
+            'molecules': ids_to_libelles(communs_ids, {**groupes1, **groupes2})
+        },
+        'only_labo1': {
+            'count': len(only1_ids),
+            'molecules': ids_to_libelles(only1_ids, groupes1)
+        },
+        'only_labo2': {
+            'count': len(only2_ids),
+            'molecules': ids_to_libelles(only2_ids, groupes2)
+        }
+    }
 
 
 @router.get("/{produit_id}", response_model=CatalogueProduitResponse)
@@ -101,3 +196,25 @@ def bulk_update_remontee(
     )
     db.commit()
     return {"message": f"{len(ids)} produits mis a jour"}
+
+
+@router.delete("/laboratoire/{laboratoire_id}/clear")
+def clear_catalogue(laboratoire_id: int, db: Session = Depends(get_db)):
+    """Vide tout le catalogue d'un laboratoire."""
+    count = db.query(CatalogueProduit).filter(
+        CatalogueProduit.laboratoire_id == laboratoire_id
+    ).delete(synchronize_session=False)
+    db.commit()
+    return {"message": f"{count} produits supprimes", "count": count}
+
+
+@router.delete("/{produit_id}")
+def delete_produit(produit_id: int, db: Session = Depends(get_db)):
+    """Supprime un produit du catalogue."""
+    db_produit = db.query(CatalogueProduit).filter(CatalogueProduit.id == produit_id).first()
+    if not db_produit:
+        raise HTTPException(status_code=404, detail="Produit non trouve")
+
+    db.delete(db_produit)
+    db.commit()
+    return {"message": "Produit supprime"}

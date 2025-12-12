@@ -346,3 +346,244 @@ def clear_matching(
     db.commit()
 
     return {"deleted": deleted}
+
+
+@router.get("/details/{import_id}/{labo_id}")
+def get_matching_details(
+    import_id: int,
+    labo_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Retourne le detail du matching pour un import et un labo specifique.
+
+    Inclut toutes les ventes avec leur statut de matching (matche ou non).
+    Mode debug: toutes les infos techniques.
+    """
+    # Verifier l'import
+    import_obj = db.query(Import).filter(Import.id == import_id).first()
+    if not import_obj:
+        raise HTTPException(status_code=404, detail="Import non trouve")
+
+    # Verifier le labo
+    labo = db.query(Laboratoire).filter(Laboratoire.id == labo_id).first()
+    if not labo:
+        raise HTTPException(status_code=404, detail="Laboratoire non trouve")
+
+    # Recuperer toutes les ventes de l'import
+    ventes = db.query(MesVentes).filter(MesVentes.import_id == import_id).all()
+
+    # Recuperer les matchings pour ce labo
+    vente_ids = [v.id for v in ventes]
+    matchings = db.query(VenteMatching).filter(
+        VenteMatching.vente_id.in_(vente_ids),
+        VenteMatching.labo_id == labo_id
+    ).all()
+
+    # Creer un dict pour lookup rapide
+    matching_by_vente = {m.vente_id: m for m in matchings}
+
+    # Construire la liste de details
+    details = []
+    matched_count = 0
+    unmatched_count = 0
+
+    for vente in ventes:
+        matching = matching_by_vente.get(vente.id)
+
+        if matching:
+            matched_count += 1
+            # Recuperer le produit matche
+            produit = db.query(CatalogueProduit).filter(
+                CatalogueProduit.id == matching.produit_id
+            ).first()
+
+            details.append({
+                "vente_id": vente.id,
+                "matched": True,
+                # Infos vente
+                "vente_designation": vente.designation,
+                "vente_code_cip": vente.code_cip_achete,
+                "vente_quantite": vente.quantite_annuelle,
+                "vente_labo_actuel": vente.labo_actuel,
+                # Infos produit matche
+                "produit_id": produit.id if produit else None,
+                "produit_nom": produit.nom_commercial if produit else None,
+                "produit_code_cip": produit.code_cip if produit else None,
+                "produit_prix_ht": float(produit.prix_ht) if produit and produit.prix_ht else None,
+                "produit_remise_pct": float(produit.remise_pct) if produit and produit.remise_pct else None,
+                "produit_groupe_generique_id": produit.groupe_generique_id if produit else None,
+                "produit_libelle_groupe": produit.libelle_groupe if produit else None,
+                # Infos matching
+                "match_score": float(matching.match_score) if matching.match_score else None,
+                "match_type": matching.match_type,
+                "matched_on": matching.matched_on,
+            })
+        else:
+            unmatched_count += 1
+            details.append({
+                "vente_id": vente.id,
+                "matched": False,
+                # Infos vente
+                "vente_designation": vente.designation,
+                "vente_code_cip": vente.code_cip_achete,
+                "vente_quantite": vente.quantite_annuelle,
+                "vente_labo_actuel": vente.labo_actuel,
+                # Pas de produit matche
+                "produit_id": None,
+                "produit_nom": None,
+                "produit_code_cip": None,
+                "produit_prix_ht": None,
+                "produit_remise_pct": None,
+                "produit_groupe_generique_id": None,
+                "produit_libelle_groupe": None,
+                "match_score": None,
+                "match_type": None,
+                "matched_on": None,
+            })
+
+    # Trier: non matches en premier, puis par designation
+    details.sort(key=lambda x: (x["matched"], x["vente_designation"] or ""))
+
+    return {
+        "import_id": import_id,
+        "labo_id": labo_id,
+        "labo_nom": labo.nom,
+        "total_ventes": len(ventes),
+        "matched_count": matched_count,
+        "unmatched_count": unmatched_count,
+        "couverture_pct": round(matched_count / len(ventes) * 100, 1) if ventes else 0,
+        "details": details
+    }
+
+
+@router.get("/search-products/{labo_id}")
+def search_products_in_labo(
+    labo_id: int,
+    q: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Recherche des produits dans le catalogue d'un labo.
+
+    Utilise pour la correction manuelle du matching.
+    """
+    # Verifier le labo
+    labo = db.query(Laboratoire).filter(Laboratoire.id == labo_id).first()
+    if not labo:
+        raise HTTPException(status_code=404, detail="Laboratoire non trouve")
+
+    # Recherche par nom ou code CIP
+    products = db.query(CatalogueProduit).filter(
+        CatalogueProduit.laboratoire_id == labo_id,
+        (
+            CatalogueProduit.nom_commercial.ilike(f"%{q}%") |
+            CatalogueProduit.code_cip.ilike(f"%{q}%") |
+            CatalogueProduit.libelle_groupe.ilike(f"%{q}%")
+        )
+    ).limit(20).all()
+
+    return {
+        "labo_id": labo_id,
+        "labo_nom": labo.nom,
+        "query": q,
+        "results": [
+            {
+                "id": p.id,
+                "nom_commercial": p.nom_commercial,
+                "code_cip": p.code_cip,
+                "prix_ht": float(p.prix_ht) if p.prix_ht else None,
+                "remise_pct": float(p.remise_pct) if p.remise_pct else None,
+                "groupe_generique_id": p.groupe_generique_id,
+                "libelle_groupe": p.libelle_groupe,
+            }
+            for p in products
+        ]
+    }
+
+
+@router.put("/manual/{vente_id}/{labo_id}")
+def set_manual_matching(
+    vente_id: int,
+    labo_id: int,
+    produit_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Definit ou modifie manuellement un matching.
+
+    Permet de corriger un matching incorrect ou d'ajouter un matching manquant.
+    """
+    # Verifier la vente
+    vente = db.query(MesVentes).filter(MesVentes.id == vente_id).first()
+    if not vente:
+        raise HTTPException(status_code=404, detail="Vente non trouvee")
+
+    # Verifier le labo
+    labo = db.query(Laboratoire).filter(Laboratoire.id == labo_id).first()
+    if not labo:
+        raise HTTPException(status_code=404, detail="Laboratoire non trouve")
+
+    # Verifier le produit
+    produit = db.query(CatalogueProduit).filter(
+        CatalogueProduit.id == produit_id,
+        CatalogueProduit.laboratoire_id == labo_id
+    ).first()
+    if not produit:
+        raise HTTPException(status_code=404, detail="Produit non trouve dans ce laboratoire")
+
+    # Chercher un matching existant
+    existing = db.query(VenteMatching).filter(
+        VenteMatching.vente_id == vente_id,
+        VenteMatching.labo_id == labo_id
+    ).first()
+
+    if existing:
+        # Mettre a jour
+        existing.produit_id = produit_id
+        existing.match_score = Decimal("100")  # Score manuel = 100%
+        existing.match_type = "manual"
+        existing.matched_on = f"Correction manuelle: {produit.nom_commercial}"
+    else:
+        # Creer nouveau
+        vm = VenteMatching(
+            vente_id=vente_id,
+            labo_id=labo_id,
+            produit_id=produit_id,
+            match_score=Decimal("100"),
+            match_type="manual",
+            matched_on=f"Correction manuelle: {produit.nom_commercial}"
+        )
+        db.add(vm)
+
+    db.commit()
+
+    return {
+        "success": True,
+        "vente_id": vente_id,
+        "labo_id": labo_id,
+        "produit_id": produit_id,
+        "produit_nom": produit.nom_commercial,
+        "message": "Matching mis a jour" if existing else "Matching cree"
+    }
+
+
+@router.delete("/manual/{vente_id}/{labo_id}")
+def delete_manual_matching(
+    vente_id: int,
+    labo_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Supprime un matching specifique.
+    """
+    deleted = db.query(VenteMatching).filter(
+        VenteMatching.vente_id == vente_id,
+        VenteMatching.labo_id == labo_id
+    ).delete()
+    db.commit()
+
+    return {
+        "success": True,
+        "deleted": deleted
+    }

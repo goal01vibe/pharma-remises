@@ -18,7 +18,7 @@ const navigation = [
   { name: 'Catalogues', href: '/catalogues', icon: Package },
   { name: 'Mes Ventes', href: '/ventes', icon: ShoppingCart },
   { name: 'Simulations', href: '/simulations', icon: Calculator },
-  { name: 'Simulation IA', href: '/simulation-intelligente', icon: Sparkles },
+  { name: 'Simulations Scenarios', href: '/simulation-intelligente', icon: Sparkles },
   { name: 'Comparaison', href: '/comparaison', icon: GitCompare },
   { name: 'Import', href: '/import', icon: FileSpreadsheet },
   { name: 'Parametres', href: '/parametres', icon: Settings },

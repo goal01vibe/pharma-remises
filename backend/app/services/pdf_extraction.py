@@ -1,12 +1,30 @@
 import os
 import json
 import re
+import io
+import logging
 from typing import Dict, Any, Optional, List
 import pdfplumber
 from openai import AsyncOpenAI
 
-# Client OpenAI
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Configuration du logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Client OpenAI - sera initialisé à la première utilisation
+_client: Optional[AsyncOpenAI] = None
+
+def get_openai_client() -> AsyncOpenAI:
+    """Récupère ou crée le client OpenAI."""
+    global _client
+    if _client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        logger.info(f"OPENAI_API_KEY present: {bool(api_key and api_key != 'your_openai_api_key_here')}")
+        if not api_key or api_key == "your_openai_api_key_here":
+            raise ValueError("OPENAI_API_KEY non configurée. Ajoutez votre clé API dans le fichier .env")
+        _client = AsyncOpenAI(api_key=api_key)
+        logger.info("Client OpenAI initialisé avec succès")
+    return _client
 
 EXTRACTION_PROMPT = """Tu es un expert en extraction de donnees de catalogues pharmaceutiques.
 
@@ -44,6 +62,7 @@ async def extract_catalogue_from_pdf(
 ) -> Dict[str, Any]:
     """
     Extrait les donnees d'un catalogue PDF avec IA.
+    Découpe automatiquement en lots de 5 pages pour éviter les limites de tokens.
 
     Args:
         pdf_content: Contenu binaire du PDF
@@ -54,44 +73,93 @@ async def extract_catalogue_from_pdf(
     Returns:
         Dict avec lignes extraites, nb_pages, et modele utilise
     """
-    # Extraire le texte des pages
-    all_text = ""
-    nb_pages = 0
+    PAGES_PAR_LOT = 5  # Nombre de pages par appel IA
 
-    with pdfplumber.open_file_like(pdf_content) as pdf:
+    logger.info(f"=== DEBUT EXTRACTION PDF ===")
+    logger.info(f"Pages: {page_debut} à {page_fin}, Modèle: {modele_ia}")
+
+    # Convertir bytes en file-like object et extraire texte par page
+    pdf_file = io.BytesIO(pdf_content)
+    pages_text = []  # Liste de tuples (page_num, text)
+
+    with pdfplumber.open(pdf_file) as pdf:
         total_pages = len(pdf.pages)
         end_page = min(page_fin or total_pages, total_pages)
+        logger.info(f"PDF: {total_pages} pages totales, extraction de {page_debut} à {end_page}")
 
         for i in range(page_debut - 1, end_page):
             page = pdf.pages[i]
             text = page.extract_text() or ""
-            all_text += f"\n--- Page {i + 1} ---\n{text}"
-            nb_pages += 1
+            pages_text.append((i + 1, text))
+
+    nb_pages = len(pages_text)
+    logger.info(f"Texte extrait de {nb_pages} pages")
+
+    if not pages_text:
+        logger.warning("AUCUN TEXTE EXTRAIT DU PDF!")
+        return {"lignes": [], "nb_pages": 0, "modele": modele_ia, "raw_response": ""}
 
     # Determiner le modele a utiliser
     if modele_ia == "auto":
-        model = "gpt-4o-mini"  # Commencer par le moins cher
+        model = "gpt-4o-mini"
     else:
         model = modele_ia
 
-    # Appeler l'API OpenAI
-    lignes = await call_openai_extraction(all_text, model)
+    # Découper en lots et extraire
+    all_lignes = []
+    all_raw_responses = []
+    nb_lots = (nb_pages + PAGES_PAR_LOT - 1) // PAGES_PAR_LOT
 
-    # Si auto et peu de resultats ou confiance basse, retry avec gpt-4o
-    if modele_ia == "auto" and len(lignes) < 5:
-        model = "gpt-4o"
-        lignes = await call_openai_extraction(all_text, model)
+    logger.info(f"Extraction en {nb_lots} lot(s) de {PAGES_PAR_LOT} pages max")
+
+    for lot_idx in range(nb_lots):
+        start_idx = lot_idx * PAGES_PAR_LOT
+        end_idx = min(start_idx + PAGES_PAR_LOT, nb_pages)
+        lot_pages = pages_text[start_idx:end_idx]
+
+        # Construire le texte du lot
+        lot_text = ""
+        for page_num, text in lot_pages:
+            lot_text += f"\n--- Page {page_num} ---\n{text}"
+
+        logger.info(f"Lot {lot_idx + 1}/{nb_lots}: pages {lot_pages[0][0]}-{lot_pages[-1][0]}, {len(lot_text)} caractères")
+
+        # Appeler l'API OpenAI pour ce lot
+        lignes, raw_response = await call_openai_extraction(lot_text, model)
+        logger.info(f"Lot {lot_idx + 1}: {len(lignes)} lignes extraites")
+
+        # Si échec avec gpt-4o-mini en mode auto, retry avec gpt-4o
+        if modele_ia == "auto" and len(lignes) == 0 and model == "gpt-4o-mini":
+            logger.info(f"Lot {lot_idx + 1}: retry avec gpt-4o")
+            lignes, raw_response = await call_openai_extraction(lot_text, "gpt-4o")
+            if lignes:
+                model = "gpt-4o"  # Switcher pour les lots suivants aussi
+            logger.info(f"Lot {lot_idx + 1} (retry gpt-4o): {len(lignes)} lignes extraites")
+
+        all_lignes.extend(lignes)
+        all_raw_responses.append(f"=== LOT {lot_idx + 1} (pages {lot_pages[0][0]}-{lot_pages[-1][0]}) ===\n{raw_response}")
+
+    logger.info(f"=== FIN EXTRACTION PDF: {len(all_lignes)} lignes totales ===")
 
     return {
-        "lignes": lignes,
+        "lignes": all_lignes,
         "nb_pages": nb_pages,
         "modele": model,
+        "raw_response": "\n\n".join(all_raw_responses),
     }
 
 
-async def call_openai_extraction(text: str, model: str) -> List[Dict[str, Any]]:
-    """Appelle l'API OpenAI pour extraire les donnees."""
+async def call_openai_extraction(text: str, model: str) -> tuple[List[Dict[str, Any]], str]:
+    """Appelle l'API OpenAI pour extraire les donnees.
+
+    Returns:
+        Tuple (lignes extraites, réponse brute de l'IA)
+    """
+    client = get_openai_client()
+    raw_response = ""
+
     try:
+        logger.info(f"Appel OpenAI avec modèle {model}...")
         response = await client.chat.completions.create(
             model=model,
             messages=[
@@ -101,14 +169,18 @@ async def call_openai_extraction(text: str, model: str) -> List[Dict[str, Any]]:
                 },
                 {
                     "role": "user",
-                    "content": EXTRACTION_PROMPT + text[:50000]  # Limite de caracteres
+                    "content": EXTRACTION_PROMPT + text[:120000]  # ~30K tokens en entrée, suffisant pour 30+ pages
                 }
             ],
             temperature=0.1,
-            max_tokens=4000,
+            max_tokens=16384,  # Maximum pour gpt-4o-mini (16K output)
         )
 
-        content = response.choices[0].message.content.strip()
+        raw_response = response.choices[0].message.content.strip()
+        logger.info(f"Réponse OpenAI reçue: {len(raw_response)} caractères")
+        logger.info(f"Réponse brute (500 premiers chars): {raw_response[:500]}")
+
+        content = raw_response
 
         # Nettoyer la reponse (enlever les backticks markdown si presents)
         if content.startswith("```"):
@@ -117,6 +189,7 @@ async def call_openai_extraction(text: str, model: str) -> List[Dict[str, Any]]:
 
         # Parser le JSON
         lignes = json.loads(content)
+        logger.info(f"JSON parsé avec succès: {len(lignes)} lignes")
 
         # Ajouter un score de confiance basique
         for ligne in lignes:
@@ -129,11 +202,12 @@ async def call_openai_extraction(text: str, model: str) -> List[Dict[str, Any]]:
                 confiance -= 0.2
             ligne["confiance"] = max(0, confiance)
 
-        return lignes
+        return lignes, raw_response
 
-    except json.JSONDecodeError:
-        # Si le JSON est invalide, retourner une liste vide
-        return []
+    except json.JSONDecodeError as e:
+        logger.error(f"ERREUR JSON: {e}")
+        logger.error(f"Contenu qui a échoué: {raw_response[:1000]}")
+        return [], raw_response
     except Exception as e:
-        print(f"Erreur extraction OpenAI: {e}")
-        return []
+        logger.error(f"ERREUR extraction OpenAI: {type(e).__name__}: {e}")
+        return [], f"ERREUR: {type(e).__name__}: {e}"

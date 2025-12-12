@@ -14,7 +14,7 @@ from rapidfuzz import fuzz, process, utils
 from cachetools import TTLCache
 from sqlalchemy.orm import Session
 
-from app.models import CatalogueProduit, Laboratoire, MesVentes
+from app.models import CatalogueProduit, Laboratoire, MesVentes, BdpmEquivalence
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ class MatchResult:
     match_type: str  # 'exact_cip', 'groupe_generique', 'fuzzy_molecule', 'fuzzy_commercial'
     prix_fabricant: Optional[Decimal] = None
     remise_pct: Optional[Decimal] = None
+    matched_on: Optional[str] = None  # Valeur qui a permis le match
 
 
 @dataclass
@@ -461,6 +462,40 @@ class IntelligentMatcher:
         self._cache[cache_key] = result
         return result
 
+    def _lookup_groupe_from_bdpm(self, cip: str) -> Optional[Tuple[int, str]]:
+        """
+        Lookup groupe_generique_id depuis la table BDPM.
+
+        Permet de trouver le groupe meme si le produit vient d'un labo
+        non importe dans le systeme (BIOGARAN, TEVA, EG, etc.)
+
+        Returns:
+            Tuple (groupe_generique_id, libelle_groupe) ou None
+        """
+        if not cip:
+            return None
+
+        cache_key = f"bdpm_lookup_{cip}"
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        # Nettoyer le CIP (garder les 13 derniers chiffres)
+        cip_clean = ''.join(c for c in cip if c.isdigit())
+        if len(cip_clean) > 13:
+            cip_clean = cip_clean[-13:]
+
+        bdpm = self.db.query(BdpmEquivalence).filter(
+            BdpmEquivalence.cip13 == cip_clean
+        ).first()
+
+        if bdpm and bdpm.groupe_generique_id:
+            result = (bdpm.groupe_generique_id, bdpm.libelle_groupe)
+        else:
+            result = None
+
+        self._cache[cache_key] = result
+        return result
+
     def find_matches_for_product(
         self,
         designation: str,
@@ -469,6 +504,12 @@ class IntelligentMatcher:
     ) -> List[MatchResult]:
         """
         Trouve les correspondances pour un produit donne.
+
+        Priorite des signaux:
+        1. Code CIP exact dans catalogue (100%)
+        2. groupe_generique_id via BDPM lookup (95%)
+        3. Fuzzy molecule + dosage + forme (max 85%)
+        4. Fuzzy nom commercial (max 70%)
 
         Args:
             designation: Nom commercial du produit
@@ -481,7 +522,7 @@ class IntelligentMatcher:
         results = []
         labs_map = self._get_labs_map()
 
-        # 1. Match par CIP exact (priorite max)
+        # 1. Match par CIP exact dans le catalogue (priorite max)
         if code_cip:
             cip_products = self._get_products_by_cip()
             cip_clean = code_cip.strip()
@@ -506,10 +547,41 @@ class IntelligentMatcher:
         if results:
             return sorted(results, key=lambda x: (-x.score, x.laboratoire_nom))
 
-        # 2. Extraire les composants de la designation
+        # 2. Match par groupe_generique_id via BDPM lookup
+        # Cela permet de trouver des equivalents meme si le labo d'origine
+        # (BIOGARAN, TEVA, EG...) n'est pas importe dans le systeme
+        if code_cip:
+            bdpm_result = self._lookup_groupe_from_bdpm(code_cip)
+            if bdpm_result:
+                groupe_id, libelle_groupe = bdpm_result
+                products_by_groupe = self._get_products_by_groupe()
+
+                if groupe_id in products_by_groupe:
+                    for p in products_by_groupe[groupe_id]:
+                        if target_lab_id and p.laboratoire_id != target_lab_id:
+                            continue
+                        results.append(MatchResult(
+                            produit_id=p.id,
+                            laboratoire_id=p.laboratoire_id,
+                            laboratoire_nom=labs_map.get(p.laboratoire_id, "?"),
+                            code_cip=p.code_cip or "",
+                            nom_commercial=p.nom_commercial or "",
+                            groupe_generique_id=p.groupe_generique_id,
+                            score=95.0,  # Tres bon score car meme groupe generique
+                            match_type='groupe_generique_bdpm',
+                            prix_fabricant=p.prix_fabricant,
+                            remise_pct=p.remise_pct,
+                            matched_on=f"Groupe {groupe_id}"
+                        ))
+
+        # Si on a des matchs par groupe BDPM, les retourner
+        if results:
+            return sorted(results, key=lambda x: (-x.score, x.laboratoire_nom))
+
+        # 3. Extraire les composants de la designation pour fuzzy matching
         query_components = self.extractor.extract_from_commercial_name(designation)
 
-        # 3. Chercher par groupe_generique_id via fuzzy matching sur molecule
+        # 4. Chercher par fuzzy matching sur molecule
         products_by_groupe = self._get_products_by_groupe()
         all_products = self.db.query(CatalogueProduit).filter(
             CatalogueProduit.actif == True

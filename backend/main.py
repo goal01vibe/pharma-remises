@@ -14,6 +14,7 @@ from app.api import (
     ventes_router,
     simulations_router,
     import_router,
+    import_rapprochement_router,
     parametres_router,
     matching_router,
     coverage_router,
@@ -53,6 +54,7 @@ app.include_router(catalogues_router)
 app.include_router(ventes_router)
 app.include_router(simulations_router)
 app.include_router(import_router)
+app.include_router(import_rapprochement_router)
 app.include_router(parametres_router)
 app.include_router(matching_router)
 app.include_router(coverage_router)
@@ -67,4 +69,3 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok"}
-# reload

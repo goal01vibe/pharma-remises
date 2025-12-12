@@ -155,6 +155,7 @@ class ImportResponse(BaseModel):
 
     id: int
     type_import: str
+    nom: Optional[str] = None
     nom_fichier: Optional[str] = None
     laboratoire_id: Optional[int] = None
     nb_lignes_importees: Optional[int] = None

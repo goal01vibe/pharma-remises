@@ -193,6 +193,30 @@ export function Simulations() {
                   </div>
 
                   <div className="grid gap-2">
+                    <Label htmlFor="import_ventes">Fichier de ventes</Label>
+                    <Select
+                      value={formData.import_ventes_id ? formData.import_ventes_id.toString() : ''}
+                      onValueChange={(v) => setFormData({ ...formData, import_ventes_id: parseInt(v) })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Selectionnez un import de ventes" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {ventesImports.map((imp) => (
+                          <SelectItem key={imp.id} value={imp.id.toString()}>
+                            {imp.nom || imp.nom_fichier} ({imp.nb_lignes_importees} lignes)
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {ventesImports.length === 0 && (
+                      <p className="text-xs text-orange-600">
+                        Aucun fichier de ventes importe. <Link to="/import?type=ventes" className="underline">Importer des ventes</Link>
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="grid gap-2">
                     <Label htmlFor="description">Description</Label>
                     <Input
                       id="description"
