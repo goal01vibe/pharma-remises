@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -6,7 +6,6 @@ import {
   getCoreRowModel,
   getFilteredRowModel,
   getSortedRowModel,
-  getPaginationRowModel,
   flexRender,
   type ColumnDef,
   type SortingState,
@@ -25,13 +24,6 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -47,10 +39,6 @@ import {
   XCircle,
   Edit,
   Trash2,
-  ChevronLeft,
-  ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
 } from 'lucide-react'
 import {
   intelligentMatchingApi,
@@ -58,6 +46,50 @@ import {
 } from '@/lib/api'
 
 type FilterMode = 'all' | 'matched' | 'unmatched'
+
+// Composant pour afficher du texte tronqué avec tooltip au hover
+function TruncatedText({
+  text,
+  className = '',
+  maxWidth = '250px'
+}: {
+  text: string | null | undefined
+  className?: string
+  maxWidth?: string
+}) {
+  const [showTooltip, setShowTooltip] = useState(false)
+  const textRef = useRef<HTMLDivElement>(null)
+  const [isOverflowing, setIsOverflowing] = useState(false)
+
+  useEffect(() => {
+    if (textRef.current) {
+      setIsOverflowing(textRef.current.scrollWidth > textRef.current.clientWidth)
+    }
+  }, [text])
+
+  if (!text) return <span className="text-muted-foreground">-</span>
+
+  return (
+    <div
+      className="relative"
+      onMouseEnter={() => isOverflowing && setShowTooltip(true)}
+      onMouseLeave={() => setShowTooltip(false)}
+    >
+      <div
+        ref={textRef}
+        className={`truncate ${className}`}
+        style={{ maxWidth }}
+      >
+        {text}
+      </div>
+      {showTooltip && (
+        <div className="absolute z-50 left-0 top-full mt-1 p-2 bg-popover border rounded-md shadow-lg text-sm max-w-[400px] whitespace-normal break-words">
+          {text}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export function MatchingDetails() {
   const { importId, laboId } = useParams<{ importId: string; laboId: string }>()
@@ -69,6 +101,37 @@ export function MatchingDetails() {
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
   const [globalFilter, setGlobalFilter] = useState('')
   const [filterMode, setFilterMode] = useState<FilterMode>('all')
+
+  // Scroll infini - charger 100 lignes a la fois
+  const [visibleCount, setVisibleCount] = useState(100)
+  const loaderRef = useRef<HTMLDivElement>(null)
+
+  // Reset visibleCount quand tri/filtre change (pour performance)
+  useEffect(() => {
+    setVisibleCount(100)
+  }, [sorting, globalFilter, filterMode])
+
+  // IntersectionObserver pour scroll infini
+  const loadMore = useCallback(() => {
+    setVisibleCount((prev) => prev + 100)
+  }, [])
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) {
+          loadMore()
+        }
+      },
+      { threshold: 0.1 }
+    )
+
+    if (loaderRef.current) {
+      observer.observe(loaderRef.current)
+    }
+
+    return () => observer.disconnect()
+  }, [loadMore])
 
   // Modal pour correction manuelle
   const [editingRow, setEditingRow] = useState<MatchingDetailItem | null>(null)
@@ -127,6 +190,7 @@ export function MatchingDetails() {
       {
         accessorKey: 'matched',
         header: 'Statut',
+        size: 80,
         cell: ({ row }) => (
           row.original.matched ? (
             <Badge variant="default" className="bg-green-600">
@@ -138,10 +202,6 @@ export function MatchingDetails() {
             </Badge>
           )
         ),
-        filterFn: (row, _id, value) => {
-          if (value === 'all') return true
-          return value === 'matched' ? row.original.matched : !row.original.matched
-        },
       },
       {
         accessorKey: 'vente_designation',
@@ -156,17 +216,31 @@ export function MatchingDetails() {
           </Button>
         ),
         cell: ({ row }) => (
-          <div className="max-w-[250px]">
-            <div className="font-medium truncate" title={row.original.vente_designation || ''}>
-              {row.original.vente_designation || '-'}
-            </div>
-            {row.original.vente_code_cip && (
-              <div className="text-xs text-muted-foreground font-mono">
-                CIP: {row.original.vente_code_cip}
-              </div>
-            )}
+          <TruncatedText
+            text={row.original.vente_designation}
+            className="font-medium"
+            maxWidth="280px"
+          />
+        ),
+      },
+      {
+        accessorKey: 'vente_code_cip',
+        header: ({ column }) => (
+          <Button
+            variant="ghost"
+            onClick={() => column.toggleSorting(column.getIsSorted() === 'asc')}
+            className="p-0 hover:bg-transparent"
+          >
+            CIP Vente
+            <ArrowUpDown className="ml-2 h-4 w-4" />
+          </Button>
+        ),
+        cell: ({ row }) => (
+          <div className="font-mono text-xs">
+            {row.original.vente_code_cip || '-'}
           </div>
         ),
+        filterFn: 'includesString',
       },
       {
         accessorKey: 'vente_quantite',
@@ -180,6 +254,7 @@ export function MatchingDetails() {
             <ArrowUpDown className="ml-2 h-4 w-4" />
           </Button>
         ),
+        size: 60,
         cell: ({ row }) => (
           <div className="text-right">{row.original.vente_quantite ?? '-'}</div>
         ),
@@ -197,22 +272,15 @@ export function MatchingDetails() {
           </Button>
         ),
         cell: ({ row }) => (
-          <div className="max-w-[250px]">
-            {row.original.matched ? (
-              <>
-                <div className="font-medium truncate text-green-700" title={row.original.produit_nom || ''}>
-                  {row.original.produit_nom || '-'}
-                </div>
-                {row.original.produit_code_cip && (
-                  <div className="text-xs text-muted-foreground font-mono">
-                    CIP: {row.original.produit_code_cip}
-                  </div>
-                )}
-              </>
-            ) : (
-              <span className="text-muted-foreground italic">Aucun match</span>
-            )}
-          </div>
+          row.original.matched ? (
+            <TruncatedText
+              text={row.original.produit_nom}
+              className="font-medium text-green-700"
+              maxWidth="250px"
+            />
+          ) : (
+            <span className="text-muted-foreground italic">Aucun match</span>
+          )
         ),
       },
       {
@@ -227,6 +295,7 @@ export function MatchingDetails() {
             <ArrowUpDown className="ml-2 h-4 w-4" />
           </Button>
         ),
+        size: 70,
         cell: ({ row }) => (
           <div className="text-center">
             {row.original.match_score ? (
@@ -244,6 +313,7 @@ export function MatchingDetails() {
       {
         accessorKey: 'match_type',
         header: 'Type',
+        size: 120,
         cell: ({ row }) => (
           <div className="text-xs">
             {row.original.match_type ? (
@@ -258,23 +328,28 @@ export function MatchingDetails() {
         accessorKey: 'matched_on',
         header: 'Matched On',
         cell: ({ row }) => (
-          <div className="max-w-[150px] text-xs text-muted-foreground truncate" title={row.original.matched_on || ''}>
-            {row.original.matched_on || '-'}
-          </div>
+          <TruncatedText
+            text={row.original.matched_on}
+            className="text-xs text-muted-foreground"
+            maxWidth="120px"
+          />
         ),
       },
       {
         accessorKey: 'produit_libelle_groupe',
         header: 'Groupe Generique',
         cell: ({ row }) => (
-          <div className="max-w-[200px] text-xs truncate" title={row.original.produit_libelle_groupe || ''}>
-            {row.original.produit_libelle_groupe || '-'}
-          </div>
+          <TruncatedText
+            text={row.original.produit_libelle_groupe}
+            className="text-xs"
+            maxWidth="180px"
+          />
         ),
       },
       {
         id: 'actions',
         header: 'Actions',
+        size: 80,
         cell: ({ row }) => (
           <div className="flex gap-1">
             <Button
@@ -306,7 +381,7 @@ export function MatchingDetails() {
         ),
       },
     ],
-    [deleteMatchMutation, laboId]
+    [deleteMatchMutation]
   )
 
   const table = useReactTable({
@@ -323,12 +398,6 @@ export function MatchingDetails() {
     getCoreRowModel: getCoreRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     getSortedRowModel: getSortedRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
-    initialState: {
-      pagination: {
-        pageSize: 50,
-      },
-    },
   })
 
   if (isLoading) {
@@ -368,11 +437,17 @@ export function MatchingDetails() {
               <div className="text-sm text-muted-foreground">Couverture</div>
               <div className="text-2xl font-bold text-primary">{details.couverture_pct}%</div>
             </Card>
-            <Card className="px-4 py-2 border-green-200 bg-green-50">
+            <Card
+              className={`px-4 py-2 border-green-200 bg-green-50 cursor-pointer transition-all hover:shadow-md hover:scale-105 ${filterMode === 'matched' ? 'ring-2 ring-green-500' : ''}`}
+              onClick={() => setFilterMode(filterMode === 'matched' ? 'all' : 'matched')}
+            >
               <div className="text-sm text-green-700">Matches</div>
               <div className="text-2xl font-bold text-green-700">{details.matched_count}</div>
             </Card>
-            <Card className="px-4 py-2 border-red-200 bg-red-50">
+            <Card
+              className={`px-4 py-2 border-red-200 bg-red-50 cursor-pointer transition-all hover:shadow-md hover:scale-105 ${filterMode === 'unmatched' ? 'ring-2 ring-red-500' : ''}`}
+              onClick={() => setFilterMode(filterMode === 'unmatched' ? 'all' : 'unmatched')}
+            >
               <div className="text-sm text-red-700">Non matches</div>
               <div className="text-2xl font-bold text-red-700">{details.unmatched_count}</div>
             </Card>
@@ -384,33 +459,37 @@ export function MatchingDetails() {
           <div className="flex-1 relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="Rechercher dans toutes les colonnes..."
+              placeholder="Rechercher dans toutes les colonnes (designation, CIP, etc.)..."
               value={globalFilter}
               onChange={(e) => setGlobalFilter(e.target.value)}
               className="pl-10"
             />
           </div>
 
-          <Select value={filterMode} onValueChange={(v) => setFilterMode(v as FilterMode)}>
-            <SelectTrigger className="w-[180px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">Tous ({details.total_ventes})</SelectItem>
-              <SelectItem value="matched">Matches ({details.matched_count})</SelectItem>
-              <SelectItem value="unmatched">Non matches ({details.unmatched_count})</SelectItem>
-            </SelectContent>
-          </Select>
+          {filterMode !== 'all' && (
+            <Button variant="outline" onClick={() => setFilterMode('all')}>
+              Afficher tout ({details.total_ventes})
+            </Button>
+          )}
         </div>
 
-        {/* Tableau */}
-        <div className="border rounded-lg">
+        {/* Info filtre actif */}
+        {filterMode !== 'all' && (
+          <div className="text-sm text-muted-foreground">
+            Filtre actif: <Badge variant={filterMode === 'matched' ? 'default' : 'destructive'}>
+              {filterMode === 'matched' ? 'Matches uniquement' : 'Non matches uniquement'}
+            </Badge>
+          </div>
+        )}
+
+        {/* Tableau avec scroll infini */}
+        <div className="border rounded-lg overflow-auto flex-1">
           <Table>
-            <TableHeader>
+            <TableHeader className="sticky top-0 bg-background z-10">
               {table.getHeaderGroups().map((headerGroup) => (
                 <TableRow key={headerGroup.id}>
                   {headerGroup.headers.map((header) => (
-                    <TableHead key={header.id}>
+                    <TableHead key={header.id} style={{ width: header.getSize() }}>
                       {header.isPlaceholder
                         ? null
                         : flexRender(header.column.columnDef.header, header.getContext())}
@@ -420,87 +499,55 @@ export function MatchingDetails() {
               ))}
             </TableHeader>
             <TableBody>
-              {table.getRowModel().rows.length ? (
-                table.getRowModel().rows.map((row) => (
-                  <TableRow
-                    key={row.id}
-                    className={row.original.matched ? '' : 'bg-red-50/50'}
-                  >
-                    {row.getVisibleCells().map((cell) => (
-                      <TableCell key={cell.id}>
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+              {(() => {
+                const allRows = table.getRowModel().rows
+                const visibleRows = allRows.slice(0, visibleCount)
+                const hasMore = visibleCount < allRows.length
+
+                if (!visibleRows.length) {
+                  return (
+                    <TableRow>
+                      <TableCell colSpan={columns.length} className="h-24 text-center">
+                        Aucun resultat.
                       </TableCell>
+                    </TableRow>
+                  )
+                }
+
+                return (
+                  <>
+                    {visibleRows.map((row) => (
+                      <TableRow
+                        key={row.id}
+                        className={row.original.matched ? '' : 'bg-red-50/50'}
+                      >
+                        {row.getVisibleCells().map((cell) => (
+                          <TableCell key={cell.id}>
+                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                          </TableCell>
+                        ))}
+                      </TableRow>
                     ))}
-                  </TableRow>
-                ))
-              ) : (
-                <TableRow>
-                  <TableCell colSpan={columns.length} className="h-24 text-center">
-                    Aucun resultat.
-                  </TableCell>
-                </TableRow>
-              )}
+                    {hasMore && (
+                      <TableRow>
+                        <TableCell colSpan={columns.length} className="text-center py-4">
+                          <div ref={loaderRef} className="text-muted-foreground text-sm">
+                            Chargement... ({visibleRows.length}/{allRows.length})
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </>
+                )
+              })()}
             </TableBody>
           </Table>
         </div>
 
-        {/* Pagination */}
-        <div className="flex items-center justify-between">
-          <div className="text-sm text-muted-foreground">
-            {table.getFilteredRowModel().rows.length} ligne(s) sur {details.total_ventes}
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => table.setPageIndex(0)}
-              disabled={!table.getCanPreviousPage()}
-            >
-              <ChevronsLeft className="h-4 w-4" />
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => table.previousPage()}
-              disabled={!table.getCanPreviousPage()}
-            >
-              <ChevronLeft className="h-4 w-4" />
-            </Button>
-            <span className="text-sm">
-              Page {table.getState().pagination.pageIndex + 1} sur {table.getPageCount()}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => table.nextPage()}
-              disabled={!table.getCanNextPage()}
-            >
-              <ChevronRight className="h-4 w-4" />
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => table.setPageIndex(table.getPageCount() - 1)}
-              disabled={!table.getCanNextPage()}
-            >
-              <ChevronsRight className="h-4 w-4" />
-            </Button>
-            <Select
-              value={table.getState().pagination.pageSize.toString()}
-              onValueChange={(v) => table.setPageSize(Number(v))}
-            >
-              <SelectTrigger className="w-[100px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {[25, 50, 100, 200].map((size) => (
-                  <SelectItem key={size} value={size.toString()}>
-                    {size} lignes
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+        {/* Info lignes */}
+        <div className="text-sm text-muted-foreground">
+          {Math.min(visibleCount, table.getRowModel().rows.length)} / {table.getFilteredRowModel().rows.length} ligne(s) affichee(s)
+          {globalFilter && ` (filtre: "${globalFilter}")`}
         </div>
       </div>
 

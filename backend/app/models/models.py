@@ -24,6 +24,7 @@ class Laboratoire(Base):
     remise_negociee = Column(Numeric(5, 2), nullable=True)  # % remise remontee negociee
     remise_ligne_defaut = Column(Numeric(5, 2), nullable=True)  # % remise ligne par defaut
     actif = Column(Boolean, default=True)
+    source = Column(String(20), default='bdpm')  # 'csv' ou 'bdpm' - origine des donnees
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -278,4 +279,5 @@ class BdpmEquivalence(Base):
     groupe_generique_id = Column(Integer, nullable=True, index=True)  # ID du groupe generique
     libelle_groupe = Column(String(500), nullable=True)  # "AMOXICILLINE + ACIDE CLAVULANIQUE 100mg..."
     type_generique = Column(Integer, nullable=True)  # 0=princeps, 1=generique
+    pfht = Column(Numeric(10, 2), nullable=True)  # Prix Fabricant HT (BDPM)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

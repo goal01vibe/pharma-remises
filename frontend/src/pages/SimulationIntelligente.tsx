@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card'
@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Loader2 } from 'lucide-react'
 import {
   Table,
@@ -55,6 +56,7 @@ export function SimulationIntelligente() {
   const [simulationResult, setSimulationResult] = useState<SimulationWithMatchingResponse | null>(null)
   const [comboResult, setComboResult] = useState<BestComboResponse | null>(null)
   const [activeTab, setActiveTab] = useState('matching')
+  const [selectedLaboIds, setSelectedLaboIds] = useState<number[]>([])
 
   // Queries
   const { data: imports } = useQuery({
@@ -101,8 +103,12 @@ export function SimulationIntelligente() {
 
   // Handlers
   const handleProcessMatching = () => {
-    if (!selectedImportId) return
-    processMatchingMutation.mutate({ import_id: selectedImportId, min_score: 70 })
+    if (!selectedImportId || selectedLaboIds.length === 0) return
+    processMatchingMutation.mutate({
+      import_id: selectedImportId,
+      min_score: 70,
+      labo_ids: selectedLaboIds,
+    })
   }
 
   const handleRunSimulation = () => {
@@ -147,6 +153,29 @@ export function SimulationIntelligente() {
 
   // Filter active labs (5 target labs)
   const targetLabs = labos?.filter((l) => l.actif) || []
+
+  // Initialiser tous les labos comme selectionnes par defaut
+  useEffect(() => {
+    if (targetLabs.length > 0 && selectedLaboIds.length === 0) {
+      setSelectedLaboIds(targetLabs.map((l) => l.id))
+    }
+  }, [targetLabs, selectedLaboIds.length])
+
+  // Toggle selection d'un labo
+  const toggleLaboSelection = (laboId: number) => {
+    setSelectedLaboIds((prev) =>
+      prev.includes(laboId) ? prev.filter((id) => id !== laboId) : [...prev, laboId]
+    )
+  }
+
+  // Tout selectionner / deselectionner
+  const toggleAllLabos = () => {
+    if (selectedLaboIds.length === targetLabs.length) {
+      setSelectedLaboIds([])
+    } else {
+      setSelectedLaboIds(targetLabs.map((l) => l.id))
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -240,20 +269,60 @@ export function SimulationIntelligente() {
               {/* Overlay de chargement pendant le matching */}
               {processMatchingMutation.isPending && (
                 <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center">
-                  <Card className="p-8 flex flex-col items-center gap-4 shadow-lg">
+                  <Card className="p-8 flex flex-col items-center gap-4 shadow-lg max-w-md">
                     <Loader2 className="h-12 w-12 animate-spin text-primary" />
                     <div className="text-center">
                       <p className="text-lg font-medium">Matching en cours...</p>
                       <p className="text-sm text-muted-foreground mt-1">
                         Import #{selectedImportId} - Analyse des {ventesImports.find(i => i.id === selectedImportId)?.nb_lignes_importees || '?'} ventes
                       </p>
-                      <p className="text-xs text-muted-foreground mt-2">
-                        Cela peut prendre 10-15 secondes
+                      <p className="text-xs text-muted-foreground mt-3 bg-muted p-2 rounded">
+                        ⏱️ Première exécution : ~1-2 min (cache froid)<br/>
+                        Exécutions suivantes : ~15-30 sec
                       </p>
                     </div>
                   </Card>
                 </div>
               )}
+
+              {/* Selection des labos a matcher */}
+              <div className="p-4 border rounded-lg bg-muted/30">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-4">
+                    <span className="text-sm font-medium">Labos a matcher :</span>
+                    <span className="text-xs text-muted-foreground">
+                      (<span className="text-green-600 font-medium">■</span> CSV importé,
+                      <span className="text-muted-foreground"> ■</span> BDPM)
+                    </span>
+                  </div>
+                  <Button variant="ghost" size="sm" onClick={toggleAllLabos}>
+                    {selectedLaboIds.length === targetLabs.length ? 'Tout decocher' : 'Tout cocher'}
+                  </Button>
+                </div>
+                <div className="flex flex-wrap gap-4">
+                  {targetLabs.map((labo) => (
+                    <label
+                      key={labo.id}
+                      className={`flex items-center gap-2 cursor-pointer p-2 rounded border transition-colors ${
+                        labo.source === 'csv'
+                          ? 'bg-green-50 border-green-200 hover:bg-green-100'
+                          : 'bg-background border-border hover:bg-muted'
+                      }`}
+                    >
+                      <Checkbox
+                        checked={selectedLaboIds.includes(labo.id)}
+                        onCheckedChange={() => toggleLaboSelection(labo.id)}
+                      />
+                      <span className={`text-sm ${labo.source === 'csv' ? 'text-green-700 font-medium' : ''}`}>
+                        {labo.nom}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                {selectedLaboIds.length === 0 && (
+                  <p className="text-sm text-destructive mt-2">Selectionnez au moins un labo</p>
+                )}
+              </div>
 
               {matchingStats?.matching_done ? (
                 <div className="space-y-4">
@@ -314,24 +383,30 @@ export function SimulationIntelligente() {
               )}
 
               {matchingResult && (
-                <div className="mt-6 p-4 bg-muted rounded-lg">
-                  <h4 className="font-medium mb-2">Resultat du matching</h4>
+                <div className="mt-6 p-4 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="h-6 w-6 rounded-full bg-green-500 flex items-center justify-center">
+                      <span className="text-white text-sm">✓</span>
+                    </div>
+                    <h4 className="font-medium text-green-700">Matching terminé avec succès</h4>
+                    <Badge variant="outline" className="ml-auto">Import #{selectedImportId}</Badge>
+                  </div>
                   <div className="grid grid-cols-3 gap-4 text-sm">
                     <div>
                       <span className="text-muted-foreground">Total ventes:</span>{' '}
                       {matchingResult.total_ventes}
                     </div>
                     <div>
-                      <span className="text-muted-foreground">Matchees:</span>{' '}
-                      <span className="text-green-600">{matchingResult.matching_results.matched}</span>
+                      <span className="text-muted-foreground">Matchées:</span>{' '}
+                      <span className="text-green-600 font-medium">{matchingResult.matching_results.matched}</span>
                     </div>
                     <div>
-                      <span className="text-muted-foreground">Non matchees:</span>{' '}
+                      <span className="text-muted-foreground">Non matchées:</span>{' '}
                       <span className="text-red-600">{matchingResult.matching_results.unmatched}</span>
                     </div>
                   </div>
                   <div className="text-xs text-muted-foreground mt-2">
-                    Temps: {matchingResult.processing_time_s}s
+                    Temps d'exécution: {matchingResult.processing_time_s}s
                   </div>
                 </div>
               )}

@@ -55,8 +55,14 @@ def process_sales_matching(
     if not ventes:
         raise HTTPException(status_code=404, detail="Aucune vente trouvee pour cet import")
 
-    # Recuperer les labos cibles
-    labos = db.query(Laboratoire).filter(Laboratoire.nom.in_(TARGET_LABS)).all()
+    # Recuperer les labos cibles (filtrer par labo_ids si fourni)
+    if request.labo_ids:
+        # Utiliser les labos specifies
+        labos = db.query(Laboratoire).filter(Laboratoire.id.in_(request.labo_ids)).all()
+    else:
+        # Tous les labos cibles par defaut
+        labos = db.query(Laboratoire).filter(Laboratoire.nom.in_(TARGET_LABS)).all()
+
     if not labos:
         raise HTTPException(status_code=404, detail="Aucun labo cible trouve. Lancez d'abord l'import BDPM.")
 
@@ -383,6 +389,16 @@ def get_matching_details(
     # Creer un dict pour lookup rapide
     matching_by_vente = {m.vente_id: m for m in matchings}
 
+    # OPTIMISATION: Recuperer tous les produits en UNE SEULE requete (evite N+1)
+    produit_ids = [m.produit_id for m in matchings if m.produit_id]
+    if produit_ids:
+        produits = db.query(CatalogueProduit).filter(
+            CatalogueProduit.id.in_(produit_ids)
+        ).all()
+        produits_by_id = {p.id: p for p in produits}
+    else:
+        produits_by_id = {}
+
     # Construire la liste de details
     details = []
     matched_count = 0
@@ -393,10 +409,8 @@ def get_matching_details(
 
         if matching:
             matched_count += 1
-            # Recuperer le produit matche
-            produit = db.query(CatalogueProduit).filter(
-                CatalogueProduit.id == matching.produit_id
-            ).first()
+            # Lookup rapide du produit (plus de requete SQL ici)
+            produit = produits_by_id.get(matching.produit_id)
 
             details.append({
                 "vente_id": vente.id,

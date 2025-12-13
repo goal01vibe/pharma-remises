@@ -9,6 +9,7 @@ export interface Laboratoire {
   remise_negociee: number | null
   remise_ligne_defaut: number | null
   actif: boolean
+  source: 'csv' | 'bdpm'  // Origine des donnees
   notes: string | null
   created_at: string
   updated_at: string
@@ -19,6 +20,7 @@ export interface LaboratoireCreate {
   remise_negociee?: number
   remise_ligne_defaut?: number
   actif?: boolean
+  source?: 'csv' | 'bdpm'
   notes?: string
 }
 

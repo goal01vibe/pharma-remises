@@ -331,6 +331,7 @@ export const matchingApi = {
 export interface ProcessSalesRequest {
   import_id: number
   min_score?: number
+  labo_ids?: number[]  // Liste des labos a matcher (si vide = tous)
 }
 
 export interface ProcessSalesResponse {

@@ -28,11 +28,11 @@ CIS_GENER_FILE = BDPM_DIR / "CIS_GENER_bdpm.txt"
 
 def parse_cis_cip(filepath: Path) -> dict:
     """
-    Parse CIS_CIP_bdpm.txt pour extraire CIP13 -> CIS.
+    Parse CIS_CIP_bdpm.txt pour extraire CIP13 -> (CIS, PFHT).
 
-    Format: CIS | code_presentation | libelle | statut | type | date | CIP13 | ...
+    Format: CIS | code_presentation | libelle | statut | type | date | CIP13 | agrement | taux_remb | PFHT | ...
     """
-    cip_to_cis = {}
+    cip_to_info = {}
 
     with open(filepath, 'r', encoding='latin-1') as f:
         for line in f:
@@ -41,11 +41,20 @@ def parse_cis_cip(filepath: Path) -> dict:
                 cis = parts[0].strip()
                 cip13 = parts[6].strip()
 
+                # Extraire PFHT (colonne 9) si disponible
+                pfht = None
+                if len(parts) >= 10:
+                    pfht_str = parts[9].strip().replace(',', '.')
+                    try:
+                        pfht = float(pfht_str) if pfht_str else None
+                    except ValueError:
+                        pfht = None
+
                 # Valider CIP13 (13 chiffres)
                 if cip13 and len(cip13) == 13 and cip13.isdigit():
-                    cip_to_cis[cip13] = cis
+                    cip_to_info[cip13] = {'cis': cis, 'pfht': pfht}
 
-    return cip_to_cis
+    return cip_to_info
 
 
 def parse_cis_gener(filepath: Path) -> dict:
@@ -90,38 +99,56 @@ def create_table_if_not_exists():
                 groupe_generique_id INTEGER,
                 libelle_groupe VARCHAR(500),
                 type_generique INTEGER,
+                pfht NUMERIC(10, 2),
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bdpm_cis ON bdpm_equivalences(cis)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bdpm_groupe ON bdpm_equivalences(groupe_generique_id)"))
+        # Ajouter colonne pfht si elle n'existe pas (pour migration)
+        conn.execute(text("""
+            DO $$
+            BEGIN
+                ALTER TABLE bdpm_equivalences ADD COLUMN IF NOT EXISTS pfht NUMERIC(10, 2);
+            EXCEPTION WHEN duplicate_column THEN
+                NULL;
+            END $$;
+        """))
         conn.commit()
-    print("Table bdpm_equivalences creee/verifiee")
+    print("Table bdpm_equivalences creee/verifiee (avec PFHT)")
 
 
 def import_bdpm_data():
     """Import les donnees BDPM dans la table bdpm_equivalences."""
 
     print(f"Lecture de {CIS_CIP_FILE}...")
-    cip_to_cis = parse_cis_cip(CIS_CIP_FILE)
-    print(f"  -> {len(cip_to_cis)} CIP13 trouves")
+    cip_to_info = parse_cis_cip(CIS_CIP_FILE)
+    print(f"  -> {len(cip_to_info)} CIP13 trouves")
 
     print(f"Lecture de {CIS_GENER_FILE}...")
     cis_to_groupe = parse_cis_gener(CIS_GENER_FILE)
     print(f"  -> {len(cis_to_groupe)} CIS avec groupe generique")
 
-    # Joindre les deux pour avoir CIP13 -> groupe_generique
+    # Joindre les deux pour avoir CIP13 -> groupe_generique + pfht
     records = []
     matched = 0
+    with_pfht = 0
 
-    for cip13, cis in cip_to_cis.items():
+    for cip13, info in cip_to_info.items():
+        cis = info['cis']
+        pfht = info['pfht']
+
         record = {
             'cip13': cip13,
             'cis': cis,
             'groupe_generique_id': None,
             'libelle_groupe': None,
-            'type_generique': None
+            'type_generique': None,
+            'pfht': pfht
         }
+
+        if pfht is not None:
+            with_pfht += 1
 
         if cis in cis_to_groupe:
             groupe_info = cis_to_groupe[cis]
@@ -133,6 +160,7 @@ def import_bdpm_data():
         records.append(record)
 
     print(f"  -> {matched} CIP13 avec groupe generique ({100*matched/len(records):.1f}%)")
+    print(f"  -> {with_pfht} CIP13 avec PFHT ({100*with_pfht/len(records):.1f}%)")
 
     # Inserer en batch
     print("Insertion dans la base...")

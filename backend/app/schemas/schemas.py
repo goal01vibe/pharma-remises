@@ -12,6 +12,7 @@ class LaboratoireBase(BaseModel):
     remise_negociee: Optional[Decimal] = None
     remise_ligne_defaut: Optional[Decimal] = None
     actif: bool = True
+    source: str = 'bdpm'  # 'csv' ou 'bdpm'
     notes: Optional[str] = None
 
 
@@ -24,6 +25,7 @@ class LaboratoireUpdate(BaseModel):
     remise_negociee: Optional[Decimal] = None
     remise_ligne_defaut: Optional[Decimal] = None
     actif: Optional[bool] = None
+    source: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -334,6 +336,7 @@ class ProcessSalesRequest(BaseModel):
     """Request pour lancer le matching des ventes."""
     import_id: int
     min_score: float = 70.0  # Score minimum pour accepter un match
+    labo_ids: list[int] | None = None  # Liste des labos a matcher (None = tous)
 
 
 class LabMatchingSummary(BaseModel):
