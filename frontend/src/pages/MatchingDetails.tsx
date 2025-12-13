@@ -117,21 +117,22 @@ export function MatchingDetails() {
   }, [])
 
   useEffect(() => {
+    const currentLoader = loaderRef.current
+    if (!currentLoader) return
+
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0].isIntersecting) {
           loadMore()
         }
       },
-      { threshold: 0.1 }
+      { threshold: 0.1, rootMargin: '100px' }
     )
 
-    if (loaderRef.current) {
-      observer.observe(loaderRef.current)
-    }
+    observer.observe(currentLoader)
 
     return () => observer.disconnect()
-  }, [loadMore])
+  }, [loadMore, visibleCount])  // Re-observer quand visibleCount change
 
   // Modal pour correction manuelle
   const [editingRow, setEditingRow] = useState<MatchingDetailItem | null>(null)
