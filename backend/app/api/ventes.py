@@ -46,3 +46,85 @@ def delete_vente(vente_id: int, db: Session = Depends(get_db)):
     db.commit()
 
     return {"success": True, "message": f"Vente {vente_id} supprimee"}
+
+
+# =====================
+# GESTION VENTES INCOMPLETES (sans prix BDPM)
+# =====================
+
+@router.get("/incomplete", response_model=List[MesVentesResponse])
+def list_incomplete_ventes(
+    import_id: int = Query(..., description="ID de l'import"),
+    db: Session = Depends(get_db)
+):
+    """Liste les ventes sans prix BDPM pour un import."""
+    return (
+        db.query(MesVentes)
+        .options(joinedload(MesVentes.presentation))
+        .filter(MesVentes.import_id == import_id)
+        .filter(MesVentes.has_bdpm_price == False)
+        .order_by(MesVentes.designation)
+        .all()
+    )
+
+
+@router.get("/incomplete/count")
+def count_incomplete_ventes(
+    import_id: int = Query(..., description="ID de l'import"),
+    db: Session = Depends(get_db)
+):
+    """Compte les ventes sans prix BDPM pour un import."""
+    total = db.query(MesVentes).filter(MesVentes.import_id == import_id).count()
+    incomplete = (
+        db.query(MesVentes)
+        .filter(MesVentes.import_id == import_id)
+        .filter(MesVentes.has_bdpm_price == False)
+        .count()
+    )
+    complete = total - incomplete
+
+    return {
+        "total": total,
+        "complete": complete,
+        "incomplete": incomplete,
+        "completion_rate": round(complete / total * 100, 1) if total > 0 else 0
+    }
+
+
+@router.delete("/incomplete/bulk")
+def delete_incomplete_ventes(
+    import_id: int = Query(..., description="ID de l'import"),
+    db: Session = Depends(get_db)
+):
+    """Supprime toutes les ventes sans prix BDPM pour un import."""
+    deleted = (
+        db.query(MesVentes)
+        .filter(MesVentes.import_id == import_id)
+        .filter(MesVentes.has_bdpm_price == False)
+        .delete()
+    )
+    db.commit()
+
+    return {"success": True, "deleted": deleted, "message": f"{deleted} ventes incompletes supprimees"}
+
+
+@router.post("/re-enrich/{import_id}")
+def re_enrich_ventes(import_id: int, db: Session = Depends(get_db)):
+    """
+    Re-execute l'enrichissement BDPM pour un import.
+    Utile apres une mise a jour des donnees BDPM.
+    """
+    from app.services.bdpm_lookup import enrich_ventes_with_bdpm
+
+    # Verifier que l'import existe
+    import_obj = db.query(Import).filter(Import.id == import_id).first()
+    if not import_obj:
+        raise HTTPException(status_code=404, detail="Import non trouve")
+
+    stats = enrich_ventes_with_bdpm(db, import_id)
+
+    return {
+        "success": True,
+        "import_id": import_id,
+        "stats": stats
+    }

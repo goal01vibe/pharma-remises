@@ -16,7 +16,6 @@ import type {
   ExtractionPDFResponse,
   Parametre,
   MatchingResult,
-  PaginatedResponse,
   RegleRemontee,
   RegleRemonteeCreate,
   CatalogueComparison,
@@ -217,6 +216,13 @@ export const importApi = {
 // ===================
 // MES VENTES
 // ===================
+export interface IncompleteCountResponse {
+  total: number
+  complete: number
+  incomplete: number
+  completion_rate: number
+}
+
 export const ventesApi = {
   list: async (importId?: number): Promise<MesVentes[]> => {
     const params = importId ? { import_id: importId } : {}
@@ -235,6 +241,27 @@ export const ventesApi = {
 
   deleteVente: async (venteId: number): Promise<void> => {
     await api.delete(`/api/ventes/${venteId}`)
+  },
+
+  // Gestion des ventes incompletes (sans prix BDPM)
+  getIncomplete: async (importId: number): Promise<MesVentes[]> => {
+    const { data } = await api.get('/api/ventes/incomplete', { params: { import_id: importId } })
+    return data
+  },
+
+  getIncompleteCount: async (importId: number): Promise<IncompleteCountResponse> => {
+    const { data } = await api.get('/api/ventes/incomplete/count', { params: { import_id: importId } })
+    return data
+  },
+
+  deleteIncomplete: async (importId: number): Promise<{ success: boolean; deleted: number }> => {
+    const { data } = await api.delete('/api/ventes/incomplete/bulk', { params: { import_id: importId } })
+    return data
+  },
+
+  reEnrich: async (importId: number): Promise<{ success: boolean; stats: Record<string, number> }> => {
+    const { data } = await api.post(`/api/ventes/re-enrich/${importId}`)
+    return data
   },
 }
 
@@ -521,6 +548,12 @@ export interface SimulationLineResult {
   disponible: boolean
   match_score?: number
   match_type?: string
+  // Prix pour indicateurs visuels
+  prix_bdpm?: number
+  prix_labo?: number
+  price_diff?: number  // Ecart BDPM - labo (positif = BDPM plus cher)
+  price_diff_pct?: number  // Ecart en % du prix BDPM
+  // Remises
   remise_ligne_pct?: number
   montant_remise_ligne?: number
   statut_remontee?: string
@@ -754,5 +787,119 @@ export const importRapprochementApi = {
 
   cancel: async (previewId: string): Promise<void> => {
     await api.delete(`/api/import/catalogue/preview/${previewId}`)
+  },
+}
+
+// ===================
+// OPTIMIZATION MULTI-LABOS
+// ===================
+export interface LaboObjectiveInput {
+  labo_id: number
+  objectif_pct?: number  // Ex: 60 = 60% du potentiel
+  objectif_montant?: number  // Ex: 30000 euros min
+  exclusions?: number[]  // Liste de produit_ids a exclure
+}
+
+export interface OptimizeRequest {
+  import_id: number
+  objectives: LaboObjectiveInput[]
+  max_time_seconds?: number
+}
+
+export interface LaboDisponible {
+  labo_id: number
+  labo_nom: string
+  remise_negociee: number
+  nb_matchings: number
+  potentiel_ht: number
+}
+
+export interface LaboRepartition {
+  labo_id: number
+  labo_nom: string
+  chiffre_ht: number
+  remise_totale: number
+  nb_produits: number
+  objectif_atteint: boolean
+  objectif_minimum: number
+  potentiel_ht: number
+  ventes?: Array<{
+    vente_id: number
+    designation: string
+    produit_id: number
+    produit_nom: string
+    quantite: number
+    prix_unitaire: number
+    montant_ht: number
+    remise_pct: number
+    gain_remise: number
+  }>
+}
+
+export interface OptimizeResponse {
+  success: boolean
+  message: string
+  repartition: LaboRepartition[]
+  chiffre_total_ht: number
+  remise_totale: number
+  couverture_pct: number
+  solver_time_ms: number
+  status: string
+}
+
+export interface ProduitLabo {
+  id: number
+  nom_commercial: string
+  code_cip?: string
+  prix_ht: number
+  remise_pct: number
+}
+
+export interface PreviewLaboInfo {
+  labo_id: number
+  labo_nom: string
+  remise_negociee: number
+  potentiel_ht: number
+  nb_produits_matches: number
+  nb_exclusions: number
+  objectif_pct?: number
+  objectif_montant?: number
+  objectif_minimum_calcule: number
+  realisable: boolean
+}
+
+export interface PreviewResponse {
+  import_id: number
+  nb_ventes: number
+  labos: PreviewLaboInfo[]
+  total_potentiel_ht: number
+  total_objectifs_ht: number
+  tous_realisables: boolean
+  message: string
+}
+
+export const optimizationApi = {
+  getLabosDisponibles: async (importId: number): Promise<{ import_id: number; nb_ventes: number; labos: LaboDisponible[] }> => {
+    const { data } = await api.get('/api/optimization/labos-disponibles', { params: { import_id: importId } })
+    return data
+  },
+
+  getProduitsLabo: async (importId: number, laboId: number, search?: string): Promise<{ labo_id: number; labo_nom: string; produits: ProduitLabo[] }> => {
+    const params: Record<string, unknown> = { import_id: importId, labo_id: laboId }
+    if (search) params.search = search
+    const { data } = await api.get('/api/optimization/produits-labo', { params })
+    return data
+  },
+
+  preview: async (request: OptimizeRequest): Promise<PreviewResponse> => {
+    const { data } = await api.post('/api/optimization/preview', request)
+    return data
+  },
+
+  run: async (request: OptimizeRequest, includeVentes?: boolean): Promise<OptimizeResponse> => {
+    const { data } = await api.post('/api/optimization/run', request, {
+      params: { include_ventes: includeVentes || false },
+    })
+    return data
   },
 }

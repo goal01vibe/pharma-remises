@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -47,8 +47,6 @@ const formatEuro = (value: number) => {
 const formatPct = (value: number) => `${value.toFixed(1)}%`
 
 export function SimulationIntelligente() {
-  const queryClient = useQueryClient()
-
   // State
   const [selectedImportId, setSelectedImportId] = useState<number | null>(null)
   const [selectedLaboId, setSelectedLaboId] = useState<number | null>(null)
@@ -525,7 +523,8 @@ export function SimulationIntelligente() {
                       <TableHeader>
                         <TableRow>
                           <TableHead>Designation</TableHead>
-                          <TableHead className="text-right">Montant HT</TableHead>
+                          <TableHead className="text-right">Prix BDPM</TableHead>
+                          <TableHead className="text-right">Prix Labo</TableHead>
                           <TableHead>Match</TableHead>
                           <TableHead className="text-right">Remise</TableHead>
                           <TableHead className="text-right">Total</TableHead>
@@ -537,8 +536,29 @@ export function SimulationIntelligente() {
                             <TableCell className="max-w-[200px] truncate">
                               {line.designation}
                             </TableCell>
-                            <TableCell className="text-right">
-                              {formatEuro(Number(line.montant_ht))}
+                            <TableCell className="text-right text-sm">
+                              {line.prix_bdpm ? formatEuro(Number(line.prix_bdpm)) : '-'}
+                            </TableCell>
+                            <TableCell className="text-right text-sm">
+                              {line.disponible && line.prix_labo ? (
+                                <div className="flex items-center justify-end gap-1">
+                                  <span>{formatEuro(Number(line.prix_labo))}</span>
+                                  {line.price_diff && Math.abs(Number(line.price_diff)) > 0.01 && (
+                                    <span
+                                      className={`text-xs ${
+                                        Number(line.price_diff) > 0
+                                          ? 'text-red-600'
+                                          : 'text-green-600'
+                                      }`}
+                                      title={`Ecart: ${Number(line.price_diff) > 0 ? '+' : ''}${formatEuro(Number(line.price_diff))} (${line.price_diff_pct?.toFixed(1)}%)`}
+                                    >
+                                      {Number(line.price_diff) > 0 ? '▲' : '▼'}
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                '-'
+                              )}
                             </TableCell>
                             <TableCell>
                               {line.disponible ? (

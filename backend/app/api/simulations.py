@@ -269,9 +269,7 @@ def run_simulation_with_matching(
     }
 
     for vente in ventes:
-        montant_ht = vente.montant_annuel or Decimal("0")
         quantite = vente.quantite_annuelle or 0
-        totaux_data["chiffre_total_ht"] += montant_ht
         totaux_data["nb_produits_total"] += 1
 
         matching = matching_map.get(vente.id)
@@ -294,6 +292,24 @@ def run_simulation_with_matching(
         if not disponible:
             matching_stats["no_match"] += 1
 
+        # === CALCUL DES PRIX ===
+        # Prix BDPM = prix de reference du marche (pour calcul chiffre total)
+        # Prix labo = prix catalogue du labo (pour calcul chiffre realisable)
+        prix_bdpm = vente.prix_bdpm or Decimal("0")
+        prix_labo = Decimal(str(produit.prix_ht)) if (disponible and produit and produit.prix_ht) else Decimal("0")
+
+        # Montant BDPM = valeur marche de la vente
+        montant_bdpm = prix_bdpm * quantite
+
+        # Montant labo = valeur au prix du catalogue labo
+        montant_labo = prix_labo * quantite if disponible and produit else Decimal("0")
+
+        # Le montant_ht affiche dans les details utilise le prix labo si disponible, sinon BDPM
+        montant_ht = montant_labo if disponible and produit else montant_bdpm
+
+        # === CHIFFRE TOTAL = TOUJOURS prix BDPM (reference marche) ===
+        totaux_data["chiffre_total_ht"] += montant_bdpm
+
         # Calcul des remises
         remise_ligne_pct = Decimal("0")
         montant_remise_ligne = Decimal("0")
@@ -303,8 +319,13 @@ def run_simulation_with_matching(
         remise_totale_pct = Decimal("0")
         montant_total_remise = Decimal("0")
 
+        # Difference de prix pour indicateur UI
+        price_diff = prix_bdpm - prix_labo if prix_bdpm and prix_labo else None
+        price_diff_pct = (price_diff / prix_bdpm * 100) if price_diff and prix_bdpm > 0 else None
+
         if disponible and produit:
-            totaux_data["chiffre_realisable_ht"] += montant_ht
+            # === CHIFFRE REALISABLE = prix labo (ce qu'on va vraiment payer) ===
+            totaux_data["chiffre_realisable_ht"] += montant_labo
             totaux_data["nb_produits_disponibles"] += 1
 
             # Remise ligne (du catalogue produit)
@@ -354,8 +375,8 @@ def run_simulation_with_matching(
             totaux_data["total_remise_globale"] += montant_total_remise
 
         else:
-            # Non disponible
-            totaux_data["chiffre_perdu_ht"] += montant_ht
+            # Non disponible - ne pas ajouter a chiffre_perdu ici
+            # chiffre_perdu sera calcule a la fin: total_bdpm - realisable_labo
             totaux_data["nb_produits_manquants"] += 1
 
         details.append(SimulationLineResult(
@@ -368,6 +389,12 @@ def run_simulation_with_matching(
             disponible=disponible,
             match_score=match_score,
             match_type=match_type,
+            # Prix pour indicateurs visuels
+            prix_bdpm=prix_bdpm if prix_bdpm > 0 else None,
+            prix_labo=prix_labo if prix_labo > 0 else None,
+            price_diff=price_diff,
+            price_diff_pct=round(price_diff_pct, 2) if price_diff_pct is not None else None,
+            # Remises
             remise_ligne_pct=remise_ligne_pct,
             montant_remise_ligne=montant_remise_ligne,
             statut_remontee=statut_remontee,
@@ -376,6 +403,11 @@ def run_simulation_with_matching(
             remise_totale_pct=remise_totale_pct,
             montant_total_remise=montant_total_remise
         ))
+
+    # === CALCUL CHIFFRE PERDU ===
+    # Formule: chiffre_total(BDPM) - chiffre_realisable(labo)
+    # Cela inclut: produits non disponibles + difference de prix BDPM vs labo
+    totaux_data["chiffre_perdu_ht"] = totaux_data["chiffre_total_ht"] - totaux_data["chiffre_realisable_ht"]
 
     # Calculer moyennes et pourcentages
     taux_couverture = Decimal("0")

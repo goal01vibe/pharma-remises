@@ -8,6 +8,7 @@ import { MesVentes } from '@/pages/MesVentes'
 import { Simulations } from '@/pages/Simulations'
 import { SimulationIntelligente } from '@/pages/SimulationIntelligente'
 import { MatchingDetails } from '@/pages/MatchingDetails'
+import { Optimization } from '@/pages/Optimization'
 import { Comparaison } from '@/pages/Comparaison'
 import { Import } from '@/pages/Import'
 import { Parametres } from '@/pages/Parametres'
@@ -36,6 +37,7 @@ function App() {
             <Route path="/simulation-intelligente" element={<SimulationIntelligente />} />
             <Route path="/matching-details/:importId/:laboId" element={<MatchingDetails />} />
             <Route path="/comparaison" element={<Comparaison />} />
+            <Route path="/optimization" element={<Optimization />} />
             <Route path="/import" element={<Import />} />
             <Route path="/parametres" element={<Parametres />} />
           </Route>

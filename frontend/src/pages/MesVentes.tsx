@@ -23,7 +23,9 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { ShoppingCart, Upload, Trash2, FileX } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Progress } from '@/components/ui/progress'
+import { ShoppingCart, Upload, Trash2, FileX, AlertTriangle, RefreshCw } from 'lucide-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ventesApi } from '@/lib/api'
 import { formatCurrency, formatNumber } from '@/lib/utils'
@@ -69,8 +71,36 @@ export function MesVentes() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['ventes-imports'] })
       queryClient.invalidateQueries({ queryKey: ['ventes'] })
+      queryClient.invalidateQueries({ queryKey: ['incomplete-count'] })
       // Selectionner le prochain import disponible
       setSelectedImportId('')
+    },
+  })
+
+  // Query pour le comptage des ventes incompletes
+  const { data: incompleteCount } = useQuery({
+    queryKey: ['incomplete-count', selectedImportId],
+    queryFn: () => ventesApi.getIncompleteCount(parseInt(selectedImportId)),
+    enabled: !!selectedImportId,
+  })
+
+  // Mutation pour supprimer les ventes incompletes
+  const deleteIncompleteMutation = useMutation({
+    mutationFn: () => ventesApi.deleteIncomplete(parseInt(selectedImportId)),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['ventes'] })
+      queryClient.invalidateQueries({ queryKey: ['incomplete-count'] })
+      alert(`${result.deleted} ventes incompletes supprimees`)
+    },
+  })
+
+  // Mutation pour re-enrichir les ventes avec BDPM
+  const reEnrichMutation = useMutation({
+    mutationFn: () => ventesApi.reEnrich(parseInt(selectedImportId)),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['ventes'] })
+      queryClient.invalidateQueries({ queryKey: ['incomplete-count'] })
+      alert(`Re-enrichissement termine: ${result.stats.enriched}/${result.stats.total} ventes enrichies`)
     },
   })
 
@@ -129,6 +159,47 @@ export function MesVentes() {
                 Total: {formatCurrency(totalMontant)} ({formatNumber(totalQuantite)} unites)
               </p>
             )}
+
+            {/* Indicateur ventes incompletes */}
+            {incompleteCount && incompleteCount.incomplete > 0 && (
+              <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                <div className="flex items-center gap-2 mb-2">
+                  <AlertTriangle className="h-4 w-4 text-amber-600" />
+                  <span className="text-sm font-medium text-amber-800">
+                    {incompleteCount.incomplete} vente{incompleteCount.incomplete > 1 ? 's' : ''} sans prix BDPM
+                  </span>
+                  <Badge variant="outline" className="bg-amber-100 text-amber-800 border-amber-300">
+                    {incompleteCount.completion_rate}% complete
+                  </Badge>
+                </div>
+                <Progress value={incompleteCount.completion_rate} className="h-2 mb-2" />
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => reEnrichMutation.mutate()}
+                    disabled={reEnrichMutation.isPending}
+                  >
+                    <RefreshCw className={`h-3 w-3 mr-1 ${reEnrichMutation.isPending ? 'animate-spin' : ''}`} />
+                    Re-enrichir BDPM
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-amber-700 border-amber-300 hover:bg-amber-100"
+                    onClick={() => {
+                      if (confirm(`Supprimer ${incompleteCount.incomplete} ventes sans prix BDPM ?`)) {
+                        deleteIncompleteMutation.mutate()
+                      }
+                    }}
+                    disabled={deleteIncompleteMutation.isPending}
+                  >
+                    <Trash2 className="h-3 w-3 mr-1" />
+                    Supprimer incompletes
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
           <Button asChild>
             <Link to="/import?type=ventes">
@@ -181,26 +252,37 @@ export function MesVentes() {
                     <TableHead>Designation</TableHead>
                     <TableHead>Labo Actuel</TableHead>
                     <TableHead className="text-right">Quantite</TableHead>
-                    <TableHead className="text-right">Prix Unitaire</TableHead>
+                    <TableHead className="text-right">Prix BDPM</TableHead>
                     <TableHead className="text-right">Montant Annuel</TableHead>
                     <TableHead className="w-[50px]"></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {ventes.slice(0, 100).map((vente) => (
-                    <TableRow key={vente.id}>
+                    <TableRow key={vente.id} className={!vente.has_bdpm_price ? 'bg-amber-50/50' : ''}>
                       <TableCell className="font-mono text-sm">
                         {vente.code_cip_achete || '-'}
                       </TableCell>
-                      <TableCell className="max-w-[300px] truncate">
-                        {vente.designation || '-'}
+                      <TableCell className="max-w-[300px]">
+                        <div className="flex items-center gap-2">
+                          <span className="truncate">{vente.designation || '-'}</span>
+                          {!vente.has_bdpm_price && (
+                            <Badge variant="outline" className="bg-amber-100 text-amber-700 text-xs shrink-0">
+                              Sans BDPM
+                            </Badge>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell>{vente.labo_actuel || '-'}</TableCell>
                       <TableCell className="text-right">
                         {vente.quantite_annuelle ? formatNumber(vente.quantite_annuelle) : '-'}
                       </TableCell>
                       <TableCell className="text-right">
-                        {vente.prix_achat_unitaire ? formatCurrency(vente.prix_achat_unitaire) : '-'}
+                        {vente.prix_bdpm ? (
+                          formatCurrency(vente.prix_bdpm)
+                        ) : (
+                          <span className="text-amber-600">-</span>
+                        )}
                       </TableCell>
                       <TableCell className="text-right font-medium">
                         {vente.montant_annuel ? formatCurrency(vente.montant_annuel) : '-'}

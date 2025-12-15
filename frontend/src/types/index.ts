@@ -124,6 +124,10 @@ export interface MesVentes {
   prix_achat_unitaire: number | null
   montant_annuel: number | null
   created_at: string
+  // Champs BDPM pour enrichissement
+  prix_bdpm: number | null  // Prix BDPM de reference
+  has_bdpm_price: boolean  // True si prix BDPM trouve
+  groupe_generique_id: number | null  // Groupe generique pour matching rapide
   // Relations
   presentation?: Presentation
 }

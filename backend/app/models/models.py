@@ -142,6 +142,11 @@ class MesVentes(Base):
     montant_annuel = Column(Numeric(12, 2), nullable=True)  # Calcule: quantite * prix
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    # Champs BDPM pour enrichissement et matching rapide
+    prix_bdpm = Column(Numeric(10, 2), nullable=True)  # Prix BDPM de reference (PFHT)
+    has_bdpm_price = Column(Boolean, default=False)  # True si prix BDPM trouve
+    groupe_generique_id = Column(Integer, nullable=True, index=True)  # Groupe generique BDPM pour matching
+
     # Relations
     presentation = relationship("Presentation", back_populates="ventes")
     import_obj = relationship("Import", back_populates="ventes")

@@ -9,6 +9,7 @@ from .parametres import router as parametres_router
 from .matching import router as matching_router
 from .coverage import router as coverage_router
 from .reports import router as reports_router
+from .optimization import router as optimization_router
 
 __all__ = [
     "laboratoires_router",
@@ -22,4 +23,5 @@ __all__ = [
     "matching_router",
     "coverage_router",
     "reports_router",
+    "optimization_router",
 ]

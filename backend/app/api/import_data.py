@@ -9,6 +9,8 @@ from app.db import get_db
 from app.models import Import, CatalogueProduit, MesVentes, Laboratoire
 from app.schemas import ImportResponse, ExtractionPDFResponse, LigneExtraite
 from app.services.pdf_extraction import extract_catalogue_from_pdf
+from app.services.bdpm_lookup import enrich_ventes_with_bdpm
+from app.utils.logger import import_catalogue_logger, import_ventes_logger, OperationMetrics
 
 router = APIRouter(prefix="/api/import", tags=["Import"])
 
@@ -39,17 +41,30 @@ async def import_catalogue(
     try:
         # Lire le fichier
         content = await file.read()
-        if file.filename.endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(content))
+        if file.filename.lower().endswith(".csv"):
+            # Auto-detect encoding
+            for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                try:
+                    content_str = content.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                content_str = content.decode('utf-8', errors='ignore')
+
+            # Auto-detect separator (comma or semicolon)
+            first_line = content_str.split('\n')[0]
+            separator = ';' if ';' in first_line else ','
+            df = pd.read_csv(io.StringIO(content_str), sep=separator, quotechar='"', on_bad_lines='skip')
         else:
             df = pd.read_excel(io.BytesIO(content))
 
-        # Mapper les colonnes (flexible)
+        # Mapper les colonnes (flexible) - variantes francaises et anglaises
         column_mapping = {
-            "code_cip": ["code_cip", "cip", "code", "CIP", "Code CIP"],
-            "designation": ["designation", "nom", "libelle", "produit", "Designation"],
-            "prix_ht": ["prix_ht", "prix", "tarif", "Prix HT", "PPHT"],
-            "remise_pct": ["remise_pct", "remise", "Remise", "% Remise"],
+            "code_cip": ["code_cip", "cip", "code", "CIP", "Code CIP", "CIP13", "cip13", "EAN", "ean"],
+            "designation": ["designation", "nom", "libelle", "produit", "Designation", "Presentation", "presentation", "Nom", "Libelle"],
+            "prix_ht": ["prix_ht", "prix", "tarif", "Prix HT", "PPHT", "Tarif", "Prix", "PRIX", "prix_unitaire"],
+            "remise_pct": ["remise_pct", "remise", "Remise", "% Remise", "taux_remise", "Taux Remise", "REMISE"],
         }
 
         def find_column(df, candidates):
@@ -58,11 +73,57 @@ async def import_catalogue(
                     return col
             return None
 
+        def parse_float(val):
+            """Parse float avec virgule ou point decimal."""
+            if val is None or pd.isna(val):
+                return None
+            val_str = str(val).strip()
+            if not val_str:
+                return None
+            # Remplacer virgule par point pour decimales
+            val_str = val_str.replace(',', '.')
+            try:
+                return float(val_str)
+            except ValueError:
+                return None
+
+        def parse_percent(val):
+            """Parse pourcentage (ex: '30%' -> 30.0 ou '2.5%' -> 2.5)."""
+            if val is None or pd.isna(val):
+                return None
+            val_str = str(val).strip()
+            if not val_str:
+                return None
+            # Enlever le symbole %
+            val_str = val_str.replace('%', '').strip()
+            # Remplacer virgule par point
+            val_str = val_str.replace(',', '.')
+            try:
+                return float(val_str)
+            except ValueError:
+                return None
+
         mapped_cols = {}
         for target, candidates in column_mapping.items():
             found = find_column(df, candidates)
             if found:
                 mapped_cols[target] = found
+
+        # === LOGGING: Initialiser les métriques ===
+        total_rows = len(df)
+        metrics = OperationMetrics(
+            import_catalogue_logger,
+            "import_catalogue",
+            total_items=total_rows,
+            batch_size=200  # Log tous les 200 produits
+        )
+        metrics.start(
+            fichier=file.filename,
+            laboratoire_id=laboratoire_id,
+            labo_nom=labo.nom,
+            nb_lignes=total_rows,
+            colonnes_detectees=mapped_cols
+        )
 
         nb_imported = 0
         nb_error = 0
@@ -71,8 +132,8 @@ async def import_catalogue(
             try:
                 code_cip = str(row.get(mapped_cols.get("code_cip", ""), "")).strip() if mapped_cols.get("code_cip") else None
                 designation = str(row.get(mapped_cols.get("designation", ""), "")).strip() if mapped_cols.get("designation") else None
-                prix_ht = float(row.get(mapped_cols.get("prix_ht", ""), 0)) if mapped_cols.get("prix_ht") else None
-                remise_pct = float(row.get(mapped_cols.get("remise_pct", ""), 0)) if mapped_cols.get("remise_pct") else None
+                prix_ht = parse_float(row.get(mapped_cols.get("prix_ht", ""))) if mapped_cols.get("prix_ht") else None
+                remise_pct = parse_percent(row.get(mapped_cols.get("remise_pct", ""))) if mapped_cols.get("remise_pct") else None
 
                 if code_cip or designation:
                     produit = CatalogueProduit(
@@ -85,8 +146,12 @@ async def import_catalogue(
                     )
                     db.add(produit)
                     nb_imported += 1
-            except Exception:
+                    metrics.increment(success=True)
+                else:
+                    metrics.increment(success=False)
+            except Exception as e:
                 nb_error += 1
+                metrics.increment(success=False)
 
         db.commit()
 
@@ -97,11 +162,19 @@ async def import_catalogue(
         db.commit()
         db.refresh(db_import)
 
+        # === LOGGING: Finaliser les métriques ===
+        metrics.finish(
+            nb_importes=nb_imported,
+            nb_erreurs=nb_error,
+            statut="termine"
+        )
+
         return db_import
 
     except Exception as e:
         db_import.statut = "erreur"
         db.commit()
+        import_catalogue_logger.error(f"[ERROR] import_catalogue | fichier: {file.filename} | erreur: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -218,8 +291,24 @@ async def import_ventes(
             if found:
                 mapped_cols[target] = found
 
+        # === LOGGING: Initialiser les métriques ===
+        total_rows = len(df)
+        metrics = OperationMetrics(
+            import_ventes_logger,
+            "import_ventes",
+            total_items=total_rows,
+            batch_size=500  # Log tous les 500 ventes
+        )
+        metrics.start(
+            fichier=file.filename,
+            nom_import=import_nom,
+            nb_lignes=total_rows,
+            colonnes_detectees=mapped_cols
+        )
+
         nb_imported = 0
         nb_error = 0
+        total_montant = 0
 
         for _, row in df.iterrows():
             try:
@@ -243,10 +332,23 @@ async def import_ventes(
                     )
                     db.add(vente)
                     nb_imported += 1
+                    if montant:
+                        total_montant += montant
+                    metrics.increment(success=True)
+                else:
+                    metrics.increment(success=False)
             except Exception:
                 nb_error += 1
+                metrics.increment(success=False)
 
         db.commit()
+
+        # === ENRICHISSEMENT BDPM: Ajouter prix BDPM et groupe_generique_id ===
+        bdpm_stats = enrich_ventes_with_bdpm(db, db_import.id)
+        import_ventes_logger.info(
+            f"Enrichissement BDPM: {bdpm_stats['enriched']}/{bdpm_stats['total']} ventes enrichies, "
+            f"{bdpm_stats['missing']} sans prix BDPM"
+        )
 
         db_import.nb_lignes_importees = nb_imported
         db_import.nb_lignes_erreur = nb_error
@@ -254,11 +356,22 @@ async def import_ventes(
         db.commit()
         db.refresh(db_import)
 
+        # === LOGGING: Finaliser les métriques ===
+        metrics.finish(
+            nb_importes=nb_imported,
+            nb_erreurs=nb_error,
+            montant_total_ht=round(total_montant, 2),
+            bdpm_enriched=bdpm_stats['enriched'],
+            bdpm_missing=bdpm_stats['missing'],
+            statut="termine"
+        )
+
         return db_import
 
     except Exception as e:
         db_import.statut = "erreur"
         db.commit()
+        import_ventes_logger.error(f"[ERROR] import_ventes | fichier: {file.filename} | erreur: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -410,3 +523,4 @@ def bdpm_mark_manual(labo_id: int, db: Session = Depends(get_db)):
         "produits_marques": updated
     }
 # force reload 2024-12-12
+# force reload dim. 14 déc. 2025 21:24:47

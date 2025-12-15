@@ -7,7 +7,6 @@ import { Slider } from '@/components/ui/slider'
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'

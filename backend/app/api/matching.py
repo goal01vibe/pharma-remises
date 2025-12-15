@@ -6,6 +6,7 @@ import time
 from decimal import Decimal
 
 from app.db import get_db
+from app.utils.logger import matching_logger, OperationMetrics
 from app.models import MesVentes, Import, Laboratoire, CatalogueProduit, VenteMatching
 from app.schemas import (
     ProcessSalesRequest,
@@ -24,19 +25,82 @@ router = APIRouter(prefix="/api/matching", tags=["Matching Intelligent"])
 TARGET_LABS = ["BIOGARAN", "SANDOZ", "ARROW", "ZENTIVA", "VIATRIS"]
 
 
+def get_matching_stats_internal(db: Session, import_id: int) -> dict:
+    """
+    Fonction interne pour recuperer les stats de matching.
+    Utilisee pour le cache et l'endpoint /stats.
+    """
+    ventes = db.query(MesVentes).filter(MesVentes.import_id == import_id).all()
+    vente_ids = [v.id for v in ventes]
+
+    if not vente_ids:
+        return {"matched": 0, "unmatched": 0, "by_lab": []}
+
+    matchings = db.query(VenteMatching).filter(VenteMatching.vente_id.in_(vente_ids)).all()
+
+    if not matchings:
+        return {"matched": 0, "unmatched": len(ventes), "by_lab": []}
+
+    # Stats par labo
+    by_lab = {}
+    matched_ventes = set()
+
+    for m in matchings:
+        if m.labo_id not in by_lab:
+            labo = db.query(Laboratoire).filter(Laboratoire.id == m.labo_id).first()
+            by_lab[m.labo_id] = {
+                "lab_id": m.labo_id,
+                "lab_nom": labo.nom if labo else "?",
+                "matched_count": 0,
+                "total_montant": Decimal("0")
+            }
+
+        vente = next((v for v in ventes if v.id == m.vente_id), None)
+        if vente:
+            by_lab[m.labo_id]["matched_count"] += 1
+            by_lab[m.labo_id]["total_montant"] += vente.montant_annuel or Decimal("0")
+            matched_ventes.add(m.vente_id)
+
+    # Construire la liste
+    total_ventes = len(ventes)
+    by_lab_list = []
+    for lab_id, stats in by_lab.items():
+        couverture = stats["matched_count"] / total_ventes * 100 if total_ventes > 0 else 0
+        by_lab_list.append({
+            "lab_id": stats["lab_id"],
+            "lab_nom": stats["lab_nom"],
+            "matched_count": stats["matched_count"],
+            "total_montant_matched": float(stats["total_montant"]),
+            "couverture_pct": round(couverture, 1)
+        })
+
+    by_lab_list.sort(key=lambda x: x["matched_count"], reverse=True)
+
+    return {
+        "matched": len(matched_ventes),
+        "unmatched": total_ventes - len(matched_ventes),
+        "by_lab": by_lab_list
+    }
+
+
 @router.post("/process-sales", response_model=ProcessSalesResponse)
 def process_sales_matching(
     request: ProcessSalesRequest,
+    force_rematch: bool = False,
     db: Session = Depends(get_db)
 ):
     """
     Lance le matching intelligent des ventes importees.
 
-    Pour chaque vente de l'import, trouve l'equivalent dans les 5 labos cibles.
+    OPTIMISATION: Utilise groupe_generique_id (jointure SQL instantanee)
+    avant de recourir au fuzzy matching (lent).
+
+    Pour chaque vente de l'import, trouve l'equivalent dans les labos cibles.
     Stocke les resultats dans la table vente_matching.
 
     Args:
         request: import_id et min_score
+        force_rematch: Si False et matching existe, retourne le cache
 
     Returns:
         Stats du matching: nb matches, unmatched, couverture par labo
@@ -55,6 +119,28 @@ def process_sales_matching(
     if not ventes:
         raise HTTPException(status_code=404, detail="Aucune vente trouvee pour cet import")
 
+    vente_ids = [v.id for v in ventes]
+
+    # === CACHE CHECK: Si matching existe et pas force_rematch, retourner stats ===
+    if not force_rematch:
+        existing_matchings = db.query(VenteMatching).filter(
+            VenteMatching.vente_id.in_(vente_ids)
+        ).first()
+
+        if existing_matchings:
+            # Matching existe deja, retourner les stats depuis le cache
+            matching_logger.info(f"Matching cache trouve pour import {request.import_id}, utilisation du cache")
+            stats = get_matching_stats_internal(db, request.import_id)
+            elapsed = time.time() - start_time
+            return ProcessSalesResponse(
+                import_id=request.import_id,
+                total_ventes=len(ventes),
+                matching_results=stats,
+                unmatched_products=[],
+                processing_time_s=round(elapsed, 2),
+                cached=True
+            )
+
     # Recuperer les labos cibles (filtrer par labo_ids si fourni)
     if request.labo_ids:
         # Utiliser les labos specifies
@@ -69,25 +155,61 @@ def process_sales_matching(
     labo_ids = [l.id for l in labos]
     labo_map = {l.id: l for l in labos}
 
+    # === LOGGING: Initialiser les métriques ===
+    total_ventes = len(ventes)
+    metrics = OperationMetrics(
+        matching_logger,
+        "process_sales_matching",
+        total_items=total_ventes * len(labos),  # ventes x labos
+        batch_size=500  # Log tous les 500 matchings
+    )
+    metrics.start(
+        import_id=request.import_id,
+        nb_ventes=total_ventes,
+        nb_labos=len(labos),
+        labos=[l.nom for l in labos],
+        min_score=request.min_score,
+        force_rematch=force_rematch
+    )
+
     # Initialiser le matcher
     matcher = IntelligentMatcher(db)
 
     # Supprimer les anciens matchings pour cet import
     db.query(VenteMatching).filter(
-        VenteMatching.vente_id.in_([v.id for v in ventes])
+        VenteMatching.vente_id.in_(vente_ids)
     ).delete(synchronize_session=False)
     db.commit()
+    matching_logger.debug(f"Anciens matchings supprimes pour import {request.import_id}")
+
+    # === OPTIMISATION: Pre-indexer les produits par groupe_generique_id ===
+    # Cela permet une jointure instantanee au lieu du fuzzy matching
+    products_by_groupe = {}
+    for labo_id in labo_ids:
+        products = db.query(CatalogueProduit).filter(
+            CatalogueProduit.laboratoire_id == labo_id,
+            CatalogueProduit.actif == True,
+            CatalogueProduit.groupe_generique_id.isnot(None)
+        ).all()
+        for p in products:
+            key = (p.groupe_generique_id, labo_id)
+            if key not in products_by_groupe:
+                products_by_groupe[key] = []
+            products_by_groupe[key].append(p)
 
     # Stats
-    total_ventes = len(ventes)
     matched_ventes = set()
     unmatched_products = []
     by_lab_stats = {l.id: {"lab_id": l.id, "lab_nom": l.nom, "matched_count": 0, "total_montant": Decimal("0")} for l in labos}
+
+    # Compteurs pour stats de type de matching
+    match_type_stats = {"groupe_generique": 0, "fuzzy": 0, "no_match": 0}
 
     # Matcher chaque vente
     for vente in ventes:
         designation = vente.designation or ""
         code_cip = vente.code_cip_achete
+        groupe_id = vente.groupe_generique_id  # Enrichi par BDPM
 
         if not designation and not code_cip:
             unmatched_products.append({
@@ -96,6 +218,7 @@ def process_sales_matching(
                 "montant": float(vente.montant_annuel or 0),
                 "reason": "Designation et code CIP manquants"
             })
+            match_type_stats["no_match"] += 1
             continue
 
         # Trouver les matches dans tous les labos
@@ -103,44 +226,69 @@ def process_sales_matching(
         candidates_for_debug = []
 
         for labo_id in labo_ids:
-            matches = matcher.find_matches_for_product(
-                designation=designation,
-                code_cip=code_cip,
-                target_lab_id=labo_id
-            )
+            matched_product = None
+            match_type = None
+            match_score = 0.0
 
-            if matches:
-                # Prendre le meilleur match
-                best = matches[0]
-                if best.score >= request.min_score:
-                    # Stocker le matching
-                    vm = VenteMatching(
-                        vente_id=vente.id,
-                        labo_id=labo_id,
-                        produit_id=best.produit_id,
-                        match_score=Decimal(str(best.score)),
-                        match_type=best.match_type,
-                        matched_on=best.matched_on
-                    )
-                    db.add(vm)
-                    has_match = True
-                    matched_ventes.add(vente.id)
-                    by_lab_stats[labo_id]["matched_count"] += 1
-                    by_lab_stats[labo_id]["total_montant"] += vente.montant_annuel or Decimal("0")
+            # === OPTIMISATION: D'abord essayer la jointure groupe_generique_id (INSTANTANE) ===
+            if groupe_id:
+                key = (groupe_id, labo_id)
+                if key in products_by_groupe:
+                    # Prendre le premier produit du groupe (ils sont tous equivalents)
+                    matched_product = products_by_groupe[key][0]
+                    match_type = "groupe_generique"
+                    match_score = 100.0  # Match exact par groupe
+
+            # === FALLBACK: Si pas de match par groupe, utiliser fuzzy (lent) ===
+            if not matched_product:
+                matches = matcher.find_matches_for_product(
+                    designation=designation,
+                    code_cip=code_cip,
+                    target_lab_id=labo_id
+                )
+                if matches and matches[0].score >= request.min_score:
+                    best = matches[0]
+                    # Recuperer le produit pour l'objet VenteMatching
+                    matched_product = db.query(CatalogueProduit).filter(
+                        CatalogueProduit.id == best.produit_id
+                    ).first()
+                    match_type = best.match_type
+                    match_score = best.score
+
+            # === LOGGING: Incrementer compteur ===
+            metrics.increment(success=bool(matched_product))
+
+            if matched_product:
+                # Stocker le matching
+                vm = VenteMatching(
+                    vente_id=vente.id,
+                    labo_id=labo_id,
+                    produit_id=matched_product.id,
+                    match_score=Decimal(str(match_score)),
+                    match_type=match_type,
+                    matched_on=f"Groupe {groupe_id}" if match_type == "groupe_generique" else None
+                )
+                db.add(vm)
+                has_match = True
+                matched_ventes.add(vente.id)
+                by_lab_stats[labo_id]["matched_count"] += 1
+                by_lab_stats[labo_id]["total_montant"] += vente.montant_annuel or Decimal("0")
+
+                # Stats par type
+                if match_type == "groupe_generique":
+                    match_type_stats["groupe_generique"] += 1
                 else:
-                    candidates_for_debug.append({
-                        "lab": labo_map[labo_id].nom,
-                        "produit": best.nom_commercial,
-                        "score": best.score
-                    })
+                    match_type_stats["fuzzy"] += 1
 
         if not has_match:
             unmatched_products.append({
                 "vente_id": vente.id,
                 "designation": designation,
                 "montant": float(vente.montant_annuel or 0),
-                "candidates": candidates_for_debug[:3]  # Top 3 candidats proches
+                "has_groupe_id": groupe_id is not None,
+                "groupe_id": groupe_id
             })
+            match_type_stats["no_match"] += 1
 
     db.commit()
 
@@ -164,13 +312,25 @@ def process_sales_matching(
 
     elapsed = time.time() - start_time
 
+    # === LOGGING: Finaliser les métriques ===
+    metrics.finish(
+        matched_ventes=len(matched_ventes),
+        unmatched_ventes=total_ventes - len(matched_ventes),
+        best_labo=by_lab_list[0]["lab_nom"] if by_lab_list else "N/A",
+        best_couverture=by_lab_list[0]["couverture_pct"] if by_lab_list else 0,
+        match_by_groupe=match_type_stats["groupe_generique"],
+        match_by_fuzzy=match_type_stats["fuzzy"],
+        no_match=match_type_stats["no_match"]
+    )
+
     return ProcessSalesResponse(
         import_id=request.import_id,
         total_ventes=total_ventes,
         matching_results={
             "matched": len(matched_ventes),
             "unmatched": total_ventes - len(matched_ventes),
-            "by_lab": by_lab_list
+            "by_lab": by_lab_list,
+            "match_type_stats": match_type_stats
         },
         unmatched_products=unmatched_products[:50],  # Limiter a 50 pour la response
         processing_time_s=round(elapsed, 2)

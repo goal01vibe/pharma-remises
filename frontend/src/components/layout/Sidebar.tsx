@@ -9,6 +9,7 @@ import {
   Settings,
   FileSpreadsheet,
   Sparkles,
+  Target,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -20,6 +21,7 @@ const navigation = [
   { name: 'Simulations', href: '/simulations', icon: Calculator },
   { name: 'Simulations Scenarios', href: '/simulation-intelligente', icon: Sparkles },
   { name: 'Comparaison', href: '/comparaison', icon: GitCompare },
+  { name: 'Optimisation', href: '/optimization', icon: Target },
   { name: 'Import', href: '/import', icon: FileSpreadsheet },
   { name: 'Parametres', href: '/parametres', icon: Settings },
 ]

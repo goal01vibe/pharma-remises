@@ -109,9 +109,9 @@ async def preview_catalogue_import(
 
         # Mapper les colonnes
         column_mapping = {
-            "code_cip": ["code_cip", "cip", "code", "CIP", "Code CIP", "CODE CIP", "CIP13", "cip13", "ACL"],
-            "designation": ["designation", "nom", "libelle", "produit", "Designation", "DESIGNATION", "Nom", "NOM", "Libelle", "LIBELLE", "Produit", "PRODUIT"],
-            "prix_ht": ["prix_ht", "prix", "tarif", "Prix HT", "PRIX HT", "Prix", "PRIX", "PPHT", "PU HT", "prix_achat"],
+            "code_cip": ["code_cip", "cip", "code", "CIP", "Code CIP", "CODE CIP", "CIP13", "cip13", "ACL", "EAN", "ean"],
+            "designation": ["designation", "nom", "libelle", "produit", "Designation", "DESIGNATION", "Nom", "NOM", "Libelle", "LIBELLE", "Produit", "PRODUIT", "Presentation", "presentation", "PRESENTATION"],
+            "prix_ht": ["prix_ht", "prix", "tarif", "Prix HT", "PRIX HT", "Prix", "PRIX", "PPHT", "PU HT", "prix_achat", "Tarif", "TARIF"],
             "remise_pct": ["remise_pct", "remise", "Remise", "REMISE", "% Remise", "% remise", "Remise %", "taux_remise", "Taux Remise"],
         }
 

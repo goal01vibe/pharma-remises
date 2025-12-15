@@ -352,9 +352,10 @@ class ProcessSalesResponse(BaseModel):
     """Response du matching des ventes."""
     import_id: int
     total_ventes: int
-    matching_results: dict  # matched, unmatched, by_lab
+    matching_results: dict  # matched, unmatched, by_lab, match_type_stats
     unmatched_products: List[dict]  # ventes sans match
     processing_time_s: float
+    cached: bool = False  # True si resultat depuis le cache
 
 
 class AnalyzeMatchRequest(BaseModel):
@@ -398,6 +399,11 @@ class SimulationLineResult(BaseModel):
     disponible: bool
     match_score: Optional[float] = None
     match_type: Optional[str] = None
+    # Prix pour indicateurs visuels
+    prix_bdpm: Optional[Decimal] = None  # Prix BDPM de reference (marche)
+    prix_labo: Optional[Decimal] = None  # Prix catalogue labo
+    price_diff: Optional[Decimal] = None  # Ecart BDPM - labo (positif = BDPM plus cher)
+    price_diff_pct: Optional[Decimal] = None  # Ecart en % du prix BDPM
     # Remises
     remise_ligne_pct: Optional[Decimal] = None
     montant_remise_ligne: Optional[Decimal] = None

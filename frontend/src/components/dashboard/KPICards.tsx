@@ -1,5 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { TrendingUp, TrendingDown, Package, AlertTriangle } from 'lucide-react'
+import { TrendingUp, Package, AlertTriangle } from 'lucide-react'
 import { formatCurrency, formatPercent } from '@/lib/utils'
 
 interface KPICardsProps {
