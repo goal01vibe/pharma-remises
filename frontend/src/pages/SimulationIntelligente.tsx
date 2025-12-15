@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card'
@@ -7,7 +7,15 @@ import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Checkbox } from '@/components/ui/checkbox'
-import { Loader2 } from 'lucide-react'
+import { Loader2, AlertTriangle, Trash2 } from 'lucide-react'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import {
   Table,
   TableBody,
@@ -55,6 +63,9 @@ export function SimulationIntelligente() {
   const [comboResult, setComboResult] = useState<BestComboResponse | null>(null)
   const [activeTab, setActiveTab] = useState('matching')
   const [selectedLaboIds, setSelectedLaboIds] = useState<number[]>([])
+  // State pour lignes ignorees
+  const [showIgnoredDialog, setShowIgnoredDialog] = useState(false)
+  const [selectedIgnoredIds, setSelectedIgnoredIds] = useState<number[]>([])
 
   // Queries
   const { data: imports } = useQuery({
@@ -98,6 +109,29 @@ export function SimulationIntelligente() {
       setActiveTab('combo')
     },
   })
+
+  const deleteIgnoredMutation = useMutation({
+    mutationFn: ventesApi.deleteByIds,
+    onSuccess: () => {
+      setShowIgnoredDialog(false)
+      setSelectedIgnoredIds([])
+      // Relancer la simulation pour mettre a jour les calculs
+      if (selectedImportId && selectedLaboId) {
+        runSimulationMutation.mutate({
+          import_id: selectedImportId,
+          labo_principal_id: selectedLaboId,
+        })
+      }
+    },
+  })
+
+  // Memo pour filtrer les lignes ignorees (sans prix)
+  const ignoredLines = useMemo(() => {
+    if (!simulationResult?.details) return []
+    return simulationResult.details.filter(
+      (line) => line.match_type === 'sans_prix'
+    )
+  }, [simulationResult?.details])
 
   // Handlers
   const handleProcessMatching = () => {
@@ -144,6 +178,31 @@ export function SimulationIntelligente() {
     } catch (error) {
       console.error('Erreur telechargement PDF:', error)
     }
+  }
+
+  // Handlers pour lignes ignorees
+  const handleToggleIgnoredSelection = (venteId: number) => {
+    setSelectedIgnoredIds((prev) =>
+      prev.includes(venteId) ? prev.filter((id) => id !== venteId) : [...prev, venteId]
+    )
+  }
+
+  const handleSelectAllIgnored = () => {
+    if (selectedIgnoredIds.length === ignoredLines.length) {
+      setSelectedIgnoredIds([])
+    } else {
+      setSelectedIgnoredIds(ignoredLines.map((l) => l.vente_id))
+    }
+  }
+
+  const handleDeleteIgnored = () => {
+    if (selectedIgnoredIds.length === 0) return
+    deleteIgnoredMutation.mutate(selectedIgnoredIds)
+  }
+
+  const handleDeleteAllIgnored = () => {
+    if (ignoredLines.length === 0) return
+    deleteIgnoredMutation.mutate(ignoredLines.map((l) => l.vente_id))
   }
 
   // Filter only ventes imports
@@ -470,6 +529,32 @@ export function SimulationIntelligente() {
                     </Card>
                   </div>
 
+                  {/* Alerte lignes ignorees */}
+                  {ignoredLines.length > 0 && (
+                    <Card className="p-4 border-orange-300 bg-orange-50">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <AlertTriangle className="h-5 w-5 text-orange-600" />
+                          <div>
+                            <div className="font-medium text-orange-700">
+                              {ignoredLines.length} ligne{ignoredLines.length > 1 ? 's' : ''} ignoree{ignoredLines.length > 1 ? 's' : ''} (sans prix)
+                            </div>
+                            <div className="text-sm text-orange-600">
+                              Ces produits n'ont ni prix BDPM ni prix labo et sont exclus des calculs
+                            </div>
+                          </div>
+                        </div>
+                        <Button
+                          variant="outline"
+                          className="border-orange-300 text-orange-700 hover:bg-orange-100"
+                          onClick={() => setShowIgnoredDialog(true)}
+                        >
+                          Voir et gerer
+                        </Button>
+                      </div>
+                    </Card>
+                  )}
+
                   {/* Remise breakdown */}
                   <div className="grid grid-cols-2 gap-4">
                     <Card className="p-4">
@@ -698,6 +783,85 @@ export function SimulationIntelligente() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* Dialog pour lignes ignorees */}
+      <Dialog open={showIgnoredDialog} onOpenChange={setShowIgnoredDialog}>
+        <DialogContent className="max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-orange-600" />
+              Lignes ignorees ({ignoredLines.length})
+            </DialogTitle>
+            <DialogDescription>
+              Ces produits n'ont ni prix BDPM ni prix labo. Ils sont exclus des calculs de simulation.
+              Vous pouvez les supprimer pour nettoyer vos donnees.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-auto border rounded-lg">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-12">
+                    <Checkbox
+                      checked={selectedIgnoredIds.length === ignoredLines.length && ignoredLines.length > 0}
+                      onCheckedChange={handleSelectAllIgnored}
+                    />
+                  </TableHead>
+                  <TableHead>Designation</TableHead>
+                  <TableHead className="text-right">Quantite</TableHead>
+                  <TableHead>Code CIP</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {ignoredLines.map((line) => (
+                  <TableRow key={line.vente_id}>
+                    <TableCell>
+                      <Checkbox
+                        checked={selectedIgnoredIds.includes(line.vente_id)}
+                        onCheckedChange={() => handleToggleIgnoredSelection(line.vente_id)}
+                      />
+                    </TableCell>
+                    <TableCell className="max-w-[300px] truncate">{line.designation}</TableCell>
+                    <TableCell className="text-right">{line.quantite}</TableCell>
+                    <TableCell className="text-muted-foreground text-sm">-</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <div className="flex-1 text-sm text-muted-foreground">
+              {selectedIgnoredIds.length > 0
+                ? `${selectedIgnoredIds.length} ligne${selectedIgnoredIds.length > 1 ? 's' : ''} selectionnee${selectedIgnoredIds.length > 1 ? 's' : ''}`
+                : 'Aucune selection'}
+            </div>
+            <Button
+              variant="outline"
+              onClick={() => setShowIgnoredDialog(false)}
+            >
+              Fermer
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteIgnored}
+              disabled={selectedIgnoredIds.length === 0 || deleteIgnoredMutation.isPending}
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Supprimer selection ({selectedIgnoredIds.length})
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteAllIgnored}
+              disabled={deleteIgnoredMutation.isPending}
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Supprimer tout ({ignoredLines.length})
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

@@ -48,6 +48,25 @@ def delete_vente(vente_id: int, db: Session = Depends(get_db)):
     return {"success": True, "message": f"Vente {vente_id} supprimee"}
 
 
+@router.delete("/bulk/by-ids")
+def delete_ventes_by_ids(
+    vente_ids: List[int],
+    db: Session = Depends(get_db)
+):
+    """Supprime plusieurs ventes par leurs IDs."""
+    if not vente_ids:
+        raise HTTPException(status_code=400, detail="Liste d'IDs vide")
+
+    deleted = (
+        db.query(MesVentes)
+        .filter(MesVentes.id.in_(vente_ids))
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+
+    return {"success": True, "deleted": deleted, "message": f"{deleted} ventes supprimees"}
+
+
 # =====================
 # GESTION VENTES INCOMPLETES (sans prix BDPM)
 # =====================

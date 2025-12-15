@@ -254,6 +254,7 @@ class TotauxSimulation(BaseModel):
     nb_produits_manquants: int
     nb_produits_exclus: int
     nb_produits_eligibles: int
+    nb_lignes_ignorees: int = 0  # Lignes sans prix BDPM ni prix labo
 
 
 # =====================

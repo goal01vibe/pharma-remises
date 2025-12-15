@@ -159,3 +159,123 @@ def delete_incomplete_ventes(db: Session, import_id: int) -> int:
     import_ventes_logger.info(f"Supprime {deleted} ventes incompletes pour import {import_id}")
 
     return deleted
+
+
+# =====================
+# ENRICHISSEMENT CATALOGUES
+# =====================
+
+def enrich_catalogue_with_bdpm(db: Session, laboratoire_id: int) -> dict:
+    """
+    Enrichit tous les produits d'un catalogue avec les prix BDPM.
+
+    Pour chaque produit du catalogue:
+    - Lookup prix BDPM via CIP13 dans BdpmEquivalence
+    - Met a jour prix_fabricant avec le pfht BDPM
+    - Met a jour groupe_generique_id et libelle_groupe si non definis
+
+    Args:
+        db: Session SQLAlchemy
+        laboratoire_id: ID du laboratoire dont enrichir le catalogue
+
+    Returns:
+        dict avec stats: {total, enriched, already_has_price, missing, errors}
+    """
+    from app.models import CatalogueProduit
+
+    produits = db.query(CatalogueProduit).filter(
+        CatalogueProduit.laboratoire_id == laboratoire_id
+    ).all()
+
+    stats = {
+        "total": len(produits),
+        "enriched": 0,
+        "already_has_price": 0,
+        "missing": 0,
+        "errors": 0
+    }
+
+    if not produits:
+        return stats
+
+    for produit in produits:
+        try:
+            # Skip si deja un prix_fabricant
+            if produit.prix_fabricant is not None:
+                stats["already_has_price"] += 1
+                continue
+
+            if produit.code_cip:
+                prix_bdpm, groupe_id, libelle = lookup_bdpm_by_cip(db, produit.code_cip)
+
+                if prix_bdpm is not None:
+                    produit.prix_fabricant = prix_bdpm
+                    stats["enriched"] += 1
+
+                    # Mettre a jour groupe si non defini
+                    if produit.groupe_generique_id is None and groupe_id:
+                        produit.groupe_generique_id = groupe_id
+                    if produit.libelle_groupe is None and libelle:
+                        produit.libelle_groupe = libelle
+                else:
+                    stats["missing"] += 1
+            else:
+                stats["missing"] += 1
+
+        except Exception as e:
+            import_ventes_logger.error(f"Erreur enrichissement produit {produit.id}: {e}")
+            stats["errors"] += 1
+
+    db.commit()
+    import_ventes_logger.info(
+        f"Enrichissement catalogue labo {laboratoire_id}: "
+        f"{stats['enriched']} enrichis, {stats['already_has_price']} deja avec prix, "
+        f"{stats['missing']} non trouves"
+    )
+
+    return stats
+
+
+def enrich_all_catalogues_with_bdpm(db: Session, exclude_labo_ids: list = None) -> dict:
+    """
+    Enrichit les catalogues de TOUS les labos avec les prix BDPM.
+
+    Args:
+        db: Session SQLAlchemy
+        exclude_labo_ids: Liste des IDs de labos a exclure
+
+    Returns:
+        dict avec stats par labo et totaux
+    """
+    from app.models import Laboratoire
+
+    exclude_labo_ids = exclude_labo_ids or []
+
+    labos = db.query(Laboratoire).filter(
+        Laboratoire.id.notin_(exclude_labo_ids) if exclude_labo_ids else True
+    ).all()
+
+    results = {
+        "labos": [],
+        "totaux": {
+            "total": 0,
+            "enriched": 0,
+            "already_has_price": 0,
+            "missing": 0,
+            "errors": 0
+        }
+    }
+
+    for labo in labos:
+        stats = enrich_catalogue_with_bdpm(db, labo.id)
+        results["labos"].append({
+            "labo_id": labo.id,
+            "labo_nom": labo.nom,
+            **stats
+        })
+
+        # Aggreger les totaux
+        for key in ["total", "enriched", "already_has_price", "missing", "errors"]:
+            results["totaux"][key] += stats[key]
+
+    return results

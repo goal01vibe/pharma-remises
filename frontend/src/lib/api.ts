@@ -263,6 +263,11 @@ export const ventesApi = {
     const { data } = await api.post(`/api/ventes/re-enrich/${importId}`)
     return data
   },
+
+  deleteByIds: async (venteIds: number[]): Promise<{ success: boolean; deleted: number }> => {
+    const { data } = await api.delete('/api/ventes/bulk/by-ids', { data: venteIds })
+    return data
+  },
 }
 
 // ===================

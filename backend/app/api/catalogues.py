@@ -218,3 +218,63 @@ def delete_produit(produit_id: int, db: Session = Depends(get_db)):
     db.delete(db_produit)
     db.commit()
     return {"message": "Produit supprime"}
+
+
+# =====================
+# ENRICHISSEMENT BDPM
+# =====================
+
+@router.post("/enrich-bdpm/{laboratoire_id}")
+def enrich_catalogue_bdpm(laboratoire_id: int, db: Session = Depends(get_db)):
+    """
+    Enrichit le catalogue d'un labo avec les prix BDPM.
+    Met a jour prix_fabricant depuis BdpmEquivalence via CIP13.
+    """
+    from app.models import Laboratoire
+    from app.services.bdpm_lookup import enrich_catalogue_with_bdpm
+
+    labo = db.query(Laboratoire).filter(Laboratoire.id == laboratoire_id).first()
+    if not labo:
+        raise HTTPException(status_code=404, detail="Laboratoire non trouve")
+
+    stats = enrich_catalogue_with_bdpm(db, laboratoire_id)
+
+    return {
+        "success": True,
+        "labo_id": laboratoire_id,
+        "labo_nom": labo.nom,
+        **stats
+    }
+
+
+@router.post("/enrich-bdpm-all")
+def enrich_all_catalogues_bdpm(
+    exclude_labo_names: List[str] = Query(default=[]),
+    db: Session = Depends(get_db)
+):
+    """
+    Enrichit les catalogues de TOUS les labos avec les prix BDPM.
+
+    Args:
+        exclude_labo_names: Liste des noms de labos a exclure (ex: "Zentiva 2026")
+    """
+    from app.models import Laboratoire
+    from app.services.bdpm_lookup import enrich_all_catalogues_with_bdpm
+
+    # Trouver les IDs des labos a exclure par nom
+    exclude_ids = []
+    if exclude_labo_names:
+        for name in exclude_labo_names:
+            labo = db.query(Laboratoire).filter(
+                Laboratoire.nom.ilike(f"%{name}%")
+            ).first()
+            if labo:
+                exclude_ids.append(labo.id)
+
+    results = enrich_all_catalogues_with_bdpm(db, exclude_labo_ids=exclude_ids)
+
+    return {
+        "success": True,
+        "excluded_labo_ids": exclude_ids,
+        **results
+    }
