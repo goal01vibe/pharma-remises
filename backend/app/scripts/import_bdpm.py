@@ -42,13 +42,21 @@ def parse_cis_cip(filepath: Path) -> dict:
                 cip13 = parts[6].strip()
 
                 # Extraire PFHT (colonne 9) si disponible
+                # Format BDPM: "1,394,44" = 1394.44 EUR (virgule milliers ET décimales)
                 pfht = None
                 if len(parts) >= 10:
-                    pfht_str = parts[9].strip().replace(',', '.')
-                    try:
-                        pfht = float(pfht_str) if pfht_str else None
-                    except ValueError:
-                        pfht = None
+                    pfht_str = parts[9].strip()
+                    if pfht_str:
+                        try:
+                            if pfht_str.count(',') >= 2:
+                                # Plusieurs virgules: dernière = décimale, autres = milliers
+                                parts_prix = pfht_str.rsplit(',', 1)
+                                pfht_str = parts_prix[0].replace(',', '') + '.' + parts_prix[1]
+                            else:
+                                pfht_str = pfht_str.replace(',', '.')
+                            pfht = float(pfht_str)
+                        except ValueError:
+                            pfht = None
 
                 # Valider CIP13 (13 chiffres)
                 if cip13 and len(cip13) == 13 and cip13.isdigit():
