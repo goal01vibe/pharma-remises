@@ -257,6 +257,30 @@ class MoleculeExtractor:
         normalized = normalized.replace(',', '.')
         return normalized
 
+    def extract(self, text: str) -> MoleculeComponents:
+        """
+        Methode principale d'extraction - detecte automatiquement le format.
+
+        Si le texte contient " - " c'est probablement un libelle_groupe BDPM,
+        sinon c'est un nom commercial.
+
+        Args:
+            text: Texte a analyser (designation vente ou libelle BDPM)
+
+        Returns:
+            MoleculeComponents avec molecule, dosage, forme extraits
+        """
+        if not text:
+            return MoleculeComponents(raw_text="")
+
+        # Detection du format
+        if ' - ' in text and ('mg' in text.lower() or 'ml' in text.lower()):
+            # Format BDPM: "MOLECULE DOSAGE - PRINCEPS DOSAGE, forme"
+            return self.extract_from_libelle_groupe(text)
+        else:
+            # Format commercial: "MOLECULE LABO DOSAGEmg Forme B/QTE"
+            return self.extract_from_commercial_name(text)
+
 
 # =============================================================================
 # FUZZY MATCHER
