@@ -1075,6 +1075,340 @@ WHERE date_changement > NOW() - INTERVAL '30 days';
 
 ---
 
+## 12. DRAWER GROUPE GENERIQUE
+
+### 12.1 Concept
+
+Ajouter une **colonne "Groupe" cliquable** dans TOUTES les tables contenant des references medicaments.
+Le clic ouvre un **drawer lateral** affichant :
+- Le princeps referent
+- Tous les equivalents du groupe
+- Actions utiles (copier CIP, naviguer)
+
+**Pourquoi un drawer plutot qu'un hover/tooltip ?**
+
+| Aspect | Hover (tooltip) | Drawer (panneau) |
+|--------|----------------|------------------|
+| Mobile | Inutilisable | Fonctionne |
+| Contenu long | Limite, disparait | Scrollable |
+| Actions | Impossible | Boutons, liens |
+| UX | Frustrant | Controle utilisateur |
+
+### 12.2 Tables concernees
+
+Toutes les tables affichant des references avec `groupe_generique_id` :
+
+- `mes_ventes` - Page Mes Ventes
+- `vente_matching` - Page Rapprochement
+- `resultats_simulation` - Page Simulation
+- `catalogue_produits` - Page Catalogues
+- `bdpm_equivalences` - Page Repertoire
+
+### 12.3 Maquette colonne cliquable
+
+```
++--------+------------------------+------------+--------+
+| CIP    | DESIGNATION            | GROUPE     | PFHT   |
++--------+------------------------+------------+--------+
+| 340093 | AMLODIPINE BIOGARAN 5MG| [1234] 👆  | 2.50 € |
+| 340094 | METFORMINE EG 850MG    | [2345] 👆  | 1.80 € |
+| 340095 | DOLIPRANE 1000MG       | [5678] 👆  | 1.50 € |
++--------+------------------------+------------+--------+
+                                    ^
+                                    Clic = ouvre drawer
+```
+
+### 12.4 Maquette Drawer
+
+```
++--------------------------------------------------+
+|  ✕  GROUPE GENERIQUE #1234                       |
++--------------------------------------------------+
+|                                                  |
+|  ★ PRINCEPS REFERENT                             |
+|  ┌────────────────────────────────────────────┐  |
+|  │ AMLOR 5MG GELULE                           │  |
+|  │ CIP: 3400930000001  |  PFHT: 2.50 €        │  |
+|  │ Laboratoire: PFIZER                        │  |
+|  └────────────────────────────────────────────┘  |
+|                                                  |
+|  📋 EQUIVALENTS GENERIQUES (12 references)       |
+|  ┌────────────────────────────────────────────┐  |
+|  │ ✓ AMLODIPINE BIOGARAN 5MG  | 2.50 € | BGR  │  |
+|  │   AMLODIPINE EG 5MG        | 2.50 € | EG   │  |
+|  │   AMLODIPINE SANDOZ 5MG    | 2.50 € | SDZ  │  |
+|  │   AMLODIPINE TEVA 5MG      | 2.50 € | TVA  │  |
+|  │   AMLODIPINE ARROW 5MG     | 2.50 € | ARW  │  |
+|  │   AMLODIPINE ZENTIVA 5MG   | 2.50 € | ZTV  │  |
+|  │   AMLODIPINE VIATRIS 5MG   | 2.50 € | VIA  │  |
+|  │   AMLODIPINE CRISTERS 5MG  | 2.50 € | CRS  │  |
+|  │   AMLODIPINE ZYDUS 5MG     | 2.50 € | ZYD  │  |
+|  │   AMLODIPINE ACCORD 5MG    | 2.50 € | ACC  │  |
+|  │   ...                                      │  |
+|  └────────────────────────────────────────────┘  |
+|                                                  |
+|  [Copier tous les CIP]  [Voir dans Repertoire]   |
+|                                                  |
++--------------------------------------------------+
+
+✓ = reference actuellement selectionnee/affichee dans le tableau
+```
+
+### 12.5 Architecture technique
+
+**Pas de redondance** - les tables stockent uniquement `groupe_generique_id` (un entier).
+Les details sont charges a la demande depuis la vue materialisee.
+
+```
+Tables existantes              Vue materialisee            Composant
+┌────────────────────┐        ┌──────────────────────┐    ┌──────────────┐
+│ mes_ventes         │        │ mv_clusters_equiv    │    │ GroupeDrawer │
+│ └─ groupe_gen_id ──┼───────→│ - groupe_gen_id      │───→│              │
+├────────────────────┤        │ - princeps_ref       │    │ Props:       │
+│ vente_matching     │        │ - equivalences       │    │ - groupeId   │
+│ └─ groupe_gen_id ──┼───────→│ - cips               │    │ - currentCip │
+├────────────────────┤        │ - nb_labos           │    └──────────────┘
+│ resultats_simul    │        │ - pfht_groupe        │
+│ └─ groupe_gen_id ──┼───────→└──────────────────────┘
+├────────────────────┤
+│ catalogue_produits │
+│ └─ groupe_gen_id ──┼───────→ (meme vue)
+└────────────────────┘
+```
+
+### 12.6 Endpoint API
+
+```python
+@router.get("/groupe/{groupe_id}/details")
+async def get_groupe_details(groupe_id: int, db: Session = Depends(get_db)):
+    """
+    Retourne les details d'un groupe generique pour le drawer.
+    Utilise la vue materialisee pour performance instantanee.
+    """
+    # Query sur vue materialisee
+    cluster = db.execute(
+        text("""
+            SELECT
+                groupe_generique_id,
+                princeps_ref,
+                equivalences,
+                cips,
+                nb_labos,
+                pfht_groupe,
+                nb_references
+            FROM mv_clusters_equivalences
+            WHERE groupe_generique_id = :groupe_id
+        """),
+        {"groupe_id": groupe_id}
+    ).fetchone()
+
+    if not cluster:
+        raise HTTPException(404, "Groupe non trouve")
+
+    # Transformer en liste structuree
+    equivalents = []
+    for cip in cluster.cips.split(', '):
+        equiv = db.query(BdpmEquivalence).filter_by(cip13=cip).first()
+        if equiv:
+            equivalents.append({
+                "cip13": equiv.cip13,
+                "denomination": equiv.denomination,
+                "pfht": float(equiv.pfht) if equiv.pfht else None,
+                "type_generique": equiv.type_generique,
+                "labo": extract_labo_from_denomination(equiv.denomination)
+            })
+
+    return {
+        "groupe_id": cluster.groupe_generique_id,
+        "princeps": {
+            "denomination": cluster.princeps_ref,
+            "pfht": float(cluster.pfht_groupe) if cluster.pfht_groupe else None
+        },
+        "equivalents": equivalents,
+        "stats": {
+            "nb_labos": cluster.nb_labos,
+            "nb_references": cluster.nb_references
+        }
+    }
+```
+
+### 12.7 Composant React
+
+```tsx
+// components/GroupeDrawer.tsx
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Star, Copy, ExternalLink } from "lucide-react"
+
+interface GroupeDrawerProps {
+  groupeId: number | null
+  currentCip?: string  // CIP actuellement affiche dans le tableau
+  open: boolean
+  onClose: () => void
+}
+
+export function GroupeDrawer({ groupeId, currentCip, open, onClose }: GroupeDrawerProps) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['groupe-details', groupeId],
+    queryFn: () => api.get(`/groupe/${groupeId}/details`),
+    enabled: !!groupeId && open
+  })
+
+  const copyAllCips = () => {
+    const cips = data.equivalents.map(e => e.cip13).join('\n')
+    navigator.clipboard.writeText(cips)
+    toast.success('CIP copies dans le presse-papier')
+  }
+
+  return (
+    <Sheet open={open} onOpenChange={onClose}>
+      <SheetContent className="w-[400px] sm:w-[540px]">
+        <SheetHeader>
+          <SheetTitle>Groupe Generique #{groupeId}</SheetTitle>
+        </SheetHeader>
+
+        {isLoading ? (
+          <div className="flex justify-center py-8">
+            <Loader2 className="h-8 w-8 animate-spin" />
+          </div>
+        ) : (
+          <div className="space-y-6 py-4">
+            {/* Princeps */}
+            <div>
+              <h3 className="flex items-center gap-2 font-semibold mb-2">
+                <Star className="h-4 w-4 text-yellow-500" />
+                Princeps Referent
+              </h3>
+              <div className="p-3 bg-blue-50 rounded-lg border border-blue-200">
+                <p className="font-bold">{data.princeps.denomination}</p>
+                <p className="text-sm text-muted-foreground">
+                  PFHT: {data.princeps.pfht?.toFixed(2)} €
+                </p>
+              </div>
+            </div>
+
+            {/* Equivalents */}
+            <div>
+              <h3 className="font-semibold mb-2">
+                Equivalents ({data.stats.nb_references} references)
+              </h3>
+              <div className="max-h-[400px] overflow-y-auto space-y-1">
+                {data.equivalents.map((equiv) => (
+                  <div
+                    key={equiv.cip13}
+                    className={`p-2 rounded flex justify-between items-center ${
+                      equiv.cip13 === currentCip
+                        ? 'bg-green-100 border border-green-300'
+                        : 'bg-gray-50'
+                    }`}
+                  >
+                    <div>
+                      <p className="text-sm font-medium">{equiv.denomination}</p>
+                      <p className="text-xs text-muted-foreground">
+                        CIP: {equiv.cip13}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <Badge variant="outline">{equiv.labo}</Badge>
+                      <p className="text-sm">{equiv.pfht?.toFixed(2)} €</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex gap-2 pt-4 border-t">
+              <Button variant="outline" onClick={copyAllCips}>
+                <Copy className="h-4 w-4 mr-2" />
+                Copier tous les CIP
+              </Button>
+              <Button variant="outline" asChild>
+                <a href={`/repertoire?groupe=${groupeId}`}>
+                  <ExternalLink className="h-4 w-4 mr-2" />
+                  Voir dans Repertoire
+                </a>
+              </Button>
+            </div>
+          </div>
+        )}
+      </SheetContent>
+    </Sheet>
+  )
+}
+```
+
+### 12.8 Utilisation dans les pages
+
+```tsx
+// Dans n'importe quelle page avec tableau de references
+import { GroupeDrawer } from "@/components/GroupeDrawer"
+
+function MesVentes() {
+  const [selectedGroupe, setSelectedGroupe] = useState<number | null>(null)
+  const [selectedCip, setSelectedCip] = useState<string>()
+
+  return (
+    <>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>CIP</TableHead>
+            <TableHead>Designation</TableHead>
+            <TableHead>Groupe</TableHead>  {/* Nouvelle colonne */}
+            <TableHead>PFHT</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {ventes.map((vente) => (
+            <TableRow key={vente.id}>
+              <TableCell>{vente.code_cip_achete}</TableCell>
+              <TableCell>{vente.designation}</TableCell>
+              <TableCell>
+                {vente.groupe_generique_id && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setSelectedGroupe(vente.groupe_generique_id)
+                      setSelectedCip(vente.code_cip_achete)
+                    }}
+                  >
+                    [{vente.groupe_generique_id}]
+                  </Button>
+                )}
+              </TableCell>
+              <TableCell>{vente.pfht}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+
+      <GroupeDrawer
+        groupeId={selectedGroupe}
+        currentCip={selectedCip}
+        open={!!selectedGroupe}
+        onClose={() => setSelectedGroupe(null)}
+      />
+    </>
+  )
+}
+```
+
+### 12.9 Checklist implementation
+
+- [ ] **Etape 1** : Creer composant `GroupeDrawer.tsx`
+- [ ] **Etape 2** : Creer endpoint `/api/groupe/{id}/details`
+- [ ] **Etape 3** : Ajouter colonne "Groupe" dans `MesVentes.tsx`
+- [ ] **Etape 4** : Ajouter colonne "Groupe" dans `RapprochementVentes.tsx`
+- [ ] **Etape 5** : Ajouter colonne "Groupe" dans `SimulationIntelligente.tsx`
+- [ ] **Etape 6** : Ajouter colonne "Groupe" dans `Catalogues.tsx`
+- [ ] **Etape 7** : Ajouter colonne "Groupe" dans `RepertoireGenerique.tsx`
+- [ ] **Etape 8** : Tester sur mobile (responsive)
+
+---
+
 **Date de creation** : 2024-12-21
-**Mise a jour** : 2024-12-22 - Ajout section 11 (Historique prix BDPM)
+**Mise a jour** : 2024-12-22 - Ajout section 12 (Drawer Groupe Generique)
 **Statut** : A valider avant implementation
