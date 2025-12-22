@@ -934,6 +934,147 @@ GROUP BY groupe_generique_id;
 
 ---
 
+## 11. HISTORIQUE DES PRIX BDPM
+
+### 11.1 Probleme
+
+Actuellement, quand le PFHT change lors d'un import BDPM, l'ancien prix est **ecrase et perdu**.
+
+```python
+# Code actuel - pas d'historique
+existing.pfht = new_pfht  # L'ancien prix disparait
+```
+
+### 11.2 Solution : Table d'historique
+
+```sql
+-- Historique des changements de prix BDPM
+CREATE TABLE bdpm_prix_historique (
+    id SERIAL PRIMARY KEY,
+    cip13 VARCHAR(13) NOT NULL,
+    pfht_ancien DECIMAL(10,4),
+    pfht_nouveau DECIMAL(10,4),
+    variation_pct DECIMAL(5,2),      -- % de variation (+ ou -)
+    date_changement TIMESTAMP DEFAULT NOW(),
+    source_import VARCHAR(50)        -- 'bdpm_2024-12', 'bdpm_2025-01', etc.
+);
+
+-- Index pour requetes rapides
+CREATE INDEX idx_prix_hist_cip ON bdpm_prix_historique(cip13);
+CREATE INDEX idx_prix_hist_date ON bdpm_prix_historique(date_changement DESC);
+```
+
+### 11.3 Modification de l'import BDPM
+
+```python
+def update_pfht_with_history(db: Session, cip13: str, new_pfht: Decimal, source: str):
+    """
+    Met a jour le PFHT en conservant l'historique si changement.
+    """
+    existing = db.query(BdpmEquivalence).filter_by(cip13=cip13).first()
+
+    if not existing:
+        return
+
+    # Pas de changement = rien a faire
+    if existing.pfht == new_pfht:
+        return
+
+    # Calculer la variation
+    variation = None
+    if existing.pfht and existing.pfht > 0:
+        variation = ((new_pfht - existing.pfht) / existing.pfht) * 100
+
+    # Archiver l'ancien prix
+    historique = BdpmPrixHistorique(
+        cip13=cip13,
+        pfht_ancien=existing.pfht,
+        pfht_nouveau=new_pfht,
+        variation_pct=variation,
+        source_import=source
+    )
+    db.add(historique)
+
+    # Mettre a jour le prix actuel
+    existing.pfht = new_pfht
+```
+
+### 11.4 Cas d'utilisation
+
+1. **Alerte variations significatives** :
+```sql
+-- Prix ayant varie de plus de 10% ce mois
+SELECT cip13, pfht_ancien, pfht_nouveau, variation_pct
+FROM bdpm_prix_historique
+WHERE date_changement > NOW() - INTERVAL '30 days'
+  AND ABS(variation_pct) > 10
+ORDER BY ABS(variation_pct) DESC;
+```
+
+2. **Historique d'un produit specifique** :
+```sql
+-- Evolution du prix d'un CIP
+SELECT date_changement, pfht_ancien, pfht_nouveau, variation_pct
+FROM bdpm_prix_historique
+WHERE cip13 = '3400930000001'
+ORDER BY date_changement DESC;
+```
+
+3. **Dashboard stats** :
+```sql
+-- Tendance globale du mois
+SELECT
+    COUNT(*) as nb_changements,
+    AVG(variation_pct) as variation_moyenne,
+    COUNT(*) FILTER (WHERE variation_pct > 0) as hausses,
+    COUNT(*) FILTER (WHERE variation_pct < 0) as baisses
+FROM bdpm_prix_historique
+WHERE date_changement > NOW() - INTERVAL '30 days';
+```
+
+### 11.5 Frontend (optionnel)
+
+**Icone sur les produits avec historique :**
+```tsx
+{item.has_price_history && (
+  <Tooltip content="Prix a change recemment">
+    <TrendingUp className="h-4 w-4 text-orange-500" />
+  </Tooltip>
+)}
+```
+
+**Modal historique au clic :**
+```
++------------------------------------------------------------------+
+| HISTORIQUE PRIX - AMLODIPINE BIOGARAN 5MG (CIP: 3400930000001)   |
++------------------------------------------------------------------+
+| DATE       | ANCIEN  | NOUVEAU | VARIATION | SOURCE              |
++------------+---------+---------+-----------+---------------------+
+| 2024-12-15 | 2.30 E  | 2.50 E  | +8.7%     | bdpm_2024-12       |
+| 2024-06-01 | 2.20 E  | 2.30 E  | +4.5%     | bdpm_2024-06       |
+| 2024-01-10 | 2.50 E  | 2.20 E  | -12.0%    | bdpm_2024-01       |
++------------------------------------------------------------------+
+```
+
+### 11.6 Impact technique
+
+| Aspect | Impact |
+|--------|--------|
+| **Nouvelle table** | 1 table, 2 index |
+| **Code import** | +15 lignes (comparaison + insert) |
+| **Requetes existantes** | Aucun changement |
+| **Performance** | Negligeable (ecriture rare) |
+| **Stockage** | ~1 KB par changement de prix |
+
+### 11.7 Checklist implementation
+
+- [ ] **Etape 1** : Creer table `bdpm_prix_historique` + index
+- [ ] **Etape 2** : Modifier `bdpm_import.py` pour appeler `update_pfht_with_history()`
+- [ ] **Etape 3** : (Optionnel) Ajouter endpoint `/api/prix-historique/{cip13}`
+- [ ] **Etape 4** : (Optionnel) Ajouter icone + modal dans le frontend
+
+---
+
 **Date de creation** : 2024-12-21
-**Mise a jour** : 2024-12-21 - Ajout section 10 (Corrections Import BDPM)
+**Mise a jour** : 2024-12-22 - Ajout section 11 (Historique prix BDPM)
 **Statut** : A valider avant implementation
