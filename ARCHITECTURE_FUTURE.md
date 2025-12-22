@@ -8,51 +8,90 @@ Optimiser le systeme de matching pour qu'il soit fait UNE SEULE FOIS et reutilis
 
 ## 1. SCHEMA DATABASE OPTIMISE
 
-### 1.1 Table des signatures canoniques
+### 1.1 Signature moleculaire (colonne calculee)
 
-Chaque combinaison unique molecule+dosage+forme = une entree canonique.
+**OPTIMISATION** : Plutot que creer une table separee `canonical_products`, on ajoute une colonne calculee a `bdpm_equivalences` existante. Cela evite la synchronisation et la redondance.
 
 ```sql
 -- Activer les extensions necessaires
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
 
--- Table des produits canoniques (molecule+dosage+forme)
-CREATE TABLE canonical_products (
-    id SERIAL PRIMARY KEY,
-    molecule_signature TEXT NOT NULL UNIQUE,  -- Ex: "AMLODIPINE 5MG COMPRIME"
-    groupe_generique_id INT,
-    pfht_reference DECIMAL(10,4),
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
-);
+-- Ajouter colonne calculee pour signature moleculaire
+-- Extrait "AMLODIPINE 5 mg" depuis libelle_groupe "AMLODIPINE 5 mg - AMLOR 5 mg, comprime"
+ALTER TABLE bdpm_equivalences
+ADD COLUMN molecule_signature TEXT GENERATED ALWAYS AS (
+    UPPER(TRIM(split_part(libelle_groupe, ' - ', 1)))
+) STORED;
 
--- Index trigram pour recherche fuzzy rapide
-CREATE INDEX idx_canonical_trgm ON canonical_products
+-- Ajouter colonne labo extrait depuis denomination
+-- Pour calculs stats fiables (evite regex fragile)
+ALTER TABLE bdpm_equivalences
+ADD COLUMN labo_extracted VARCHAR(50);
+
+-- Index trigram pour recherche fuzzy rapide sur signature
+CREATE INDEX idx_bdpm_signature_trgm ON bdpm_equivalences
     USING gin (molecule_signature gin_trgm_ops);
+
+-- Index sur labo extrait pour stats groupees
+CREATE INDEX idx_bdpm_labo ON bdpm_equivalences(labo_extracted);
 ```
 
-### 1.2 Table de cache des matchs pre-calcules
+**Peuplement du labo extrait (a l'import BDPM)** :
+```python
+# Dans bdpm_import.py - extraction labo depuis denomination
+def extract_labo_from_denomination(denomination: str) -> Optional[str]:
+    """Extrait le nom du labo depuis la denomination BDPM."""
+    LABO_PATTERNS = {
+        'BIOGARAN': r'\bBIOGARAN\b|\bBGR\b',
+        'SANDOZ': r'\bSANDOZ\b',
+        'ARROW': r'\bARROW\b',
+        'ZENTIVA': r'\bZENTIVA\b',
+        'VIATRIS': r'\bVIATRIS\b|\bMYLAN\b',
+        'EG': r'\bEG\b',
+        'TEVA': r'\bTEVA\b',
+        'CRISTERS': r'\bCRISTERS\b',
+        'ZYDUS': r'\bZYDUS\b',
+        'ACCORD': r'\bACCORD\b',
+    }
+    for labo, pattern in LABO_PATTERNS.items():
+        if re.search(pattern, denomination, re.IGNORECASE):
+            return labo
+    return None
+```
 
+### 1.2 Enrichissement de matching_memory (pas de nouvelle table)
+
+**OPTIMISATION** : La table `matching_memory` existe deja (migration 005) avec une structure similaire.
+Plutot que creer une nouvelle table `product_matches`, on enrichit `matching_memory` avec les colonnes manquantes.
+
+**Structure actuelle de `matching_memory`** :
+- `cip13` (UNIQUE) - deja present
+- `designation` - deja present
+- `groupe_generique_id` - deja present
+- `match_origin` - deja present
+- `match_score` - deja present
+- `validated` / `validated_at` - deja present
+
+**Colonnes a ajouter** :
 ```sql
--- Cache des matchs (calcule une fois, utilise pour toujours)
-CREATE TABLE product_matches (
-    id SERIAL PRIMARY KEY,
-    source_cip13 VARCHAR(13) UNIQUE,      -- CIP de la vente ou externe
-    source_designation TEXT,               -- Nom original du produit
-    canonical_id INT REFERENCES canonical_products(id),
-    matched_cip13 VARCHAR(13),            -- CIP correspondant dans BDPM
-    match_type VARCHAR(20),               -- 'cip_exact', 'groupe_exact', 'fuzzy'
-    match_score FLOAT,                    -- Score 0-100
-    pfht DECIMAL(10,4),                   -- Prix PFHT du match
-    matched_at TIMESTAMP DEFAULT NOW()
-);
+-- Enrichir matching_memory avec les colonnes manquantes pour le cache complet
+ALTER TABLE matching_memory
+ADD COLUMN IF NOT EXISTS matched_cip13 VARCHAR(13),          -- CIP BDPM correspondant
+ADD COLUMN IF NOT EXISTS matched_denomination TEXT,          -- Nom du produit matche
+ADD COLUMN IF NOT EXISTS pfht DECIMAL(10,4),                 -- Prix PFHT du match
+ADD COLUMN IF NOT EXISTS matched_at TIMESTAMP DEFAULT NOW(); -- Date du match
 
--- Index pour lookups ultra-rapides
-CREATE INDEX idx_matches_cip ON product_matches(source_cip13);
-CREATE INDEX idx_matches_canonical ON product_matches(canonical_id);
-CREATE INDEX idx_matches_type ON product_matches(match_type);
+-- Index supplementaires pour lookups rapides
+CREATE INDEX IF NOT EXISTS idx_matching_matched_cip ON matching_memory(matched_cip13);
+CREATE INDEX IF NOT EXISTS idx_matching_type ON matching_memory(match_origin);
+CREATE INDEX IF NOT EXISTS idx_matching_score ON matching_memory(match_score DESC);
 ```
+
+**Avantages de cette approche** :
+- Pas de nouvelle table a synchroniser
+- Reutilise la logique de groupes transitifs existante
+- Le champ `validated` permet de distinguer les matchs automatiques des matchs valides
 
 ### 1.3 Colonne de tracking BDPM
 
@@ -180,28 +219,32 @@ REFRESH MATERIALIZED VIEW CONCURRENTLY mv_matching_stats;
 Cette vue pre-calcule tous les generiques equivalents par groupe BDPM.
 Resultat instantane au lieu de recalculer a chaque requete.
 
+**OPTIMISATION** : Utilise la colonne `labo_extracted` (ajoutee en 1.1) au lieu d'une regex fragile sur le premier mot de denomination.
+
 ```sql
 -- Vue materialisee des clusters d'equivalences par groupe generique
 CREATE MATERIALIZED VIEW mv_clusters_equivalences AS
 SELECT
     groupe_generique_id,
+    -- Princeps du groupe (CIP + nom)
+    MAX(CASE WHEN type_generique = 0 THEN cip13 END) as princeps_cip13,
+    MAX(CASE WHEN type_generique = 0 THEN denomination END) as princeps_ref,
     -- Tous les noms du groupe concatenes
     string_agg(DISTINCT denomination, ' | ' ORDER BY denomination) as equivalences,
     -- Tous les CIP du groupe
     string_agg(DISTINCT cip13, ', ' ORDER BY cip13) as cips,
-    -- Nombre de laboratoires differents
-    count(DISTINCT
-        CASE WHEN denomination ~ '^[A-Z]+ '
-        THEN split_part(denomination, ' ', 1)
-        ELSE 'INCONNU' END
-    ) as nb_labos,
+    -- Nombre de laboratoires differents (utilise labo_extracted, fiable)
+    count(DISTINCT labo_extracted) FILTER (WHERE labo_extracted IS NOT NULL) as nb_labos,
+    -- Liste des labos du groupe
+    string_agg(DISTINCT labo_extracted, ', ' ORDER BY labo_extracted)
+        FILTER (WHERE labo_extracted IS NOT NULL) as labos_liste,
     -- Prix PFHT (tous identiques dans un groupe, on prend le max non-null)
     MAX(pfht) as pfht_groupe,
     -- Nombre total de references dans le groupe
     count(*) as nb_references,
     -- Date derniere MAJ du groupe
-    MAX(updated_at) as derniere_maj
-FROM bdpm_equivalence
+    MAX(created_at) as derniere_maj
+FROM bdpm_equivalences
 WHERE groupe_generique_id IS NOT NULL
 GROUP BY groupe_generique_id;
 
@@ -260,7 +303,68 @@ groupe_id | equivalences                                           | cips       
 
 ## 4. CODE PYTHON - BATCH MATCHING
 
-### 4.1 Matching matriciel avec RapidFuzz
+### 4.1 Preprocessing pharma avant matching
+
+**OPTIMISATION** : Normaliser les noms pharmaceutiques AVANT le matching fuzzy ameliore significativement la precision.
+Cette fonction utilise les patterns deja definis dans `intelligent_matching.py`.
+
+```python
+import re
+from typing import Set
+
+# Labos a supprimer du texte pour matching (deja dans intelligent_matching.py)
+LABOS_CONNUS: Set[str] = {
+    'viatris', 'zentiva', 'biogaran', 'sandoz', 'teva', 'mylan', 'arrow',
+    'eg', 'cristers', 'accord', 'ranbaxy', 'zydus', 'sun', 'almus', 'bgr',
+    'ratiopharm', 'actavis', 'winthrop', 'pfizer', 'sanofi', 'bayer',
+}
+
+# Formes a normaliser (deja dans intelligent_matching.py)
+FORMES_MAPPING = {
+    'cpr': 'comprime', 'cp': 'comprime', 'comp': 'comprime',
+    'gel': 'gelule', 'caps': 'capsule', 'sol': 'solution',
+    'susp': 'suspension', 'inj': 'injectable', 'cr': 'creme',
+    'pom': 'pommade', 'suppo': 'suppositoire', 'pdre': 'poudre',
+}
+
+def preprocess_pharma(text: str) -> str:
+    """
+    Normalise les noms pharma avant matching fuzzy.
+    Ameliore la precision en supprimant le bruit (labos, abreviations).
+
+    Args:
+        text: Nom du medicament brut
+
+    Returns:
+        Nom normalise pour matching
+    """
+    if not text:
+        return ""
+
+    result = text.upper()
+
+    # 1. Supprimer les noms de labos
+    for labo in LABOS_CONNUS:
+        result = re.sub(rf'\b{labo.upper()}\b', '', result)
+
+    # 2. Normaliser les formes (CPR → COMPRIME)
+    for abbr, full in FORMES_MAPPING.items():
+        result = re.sub(rf'\b{abbr.upper()}\b', full.upper(), result)
+
+    # 3. Normaliser dosages (40 mg → 40MG, supprimer espaces)
+    result = re.sub(r'(\d+)\s*(MG|G|ML|MCG|UI)', r'\1\2', result)
+
+    # 4. Supprimer conditionnement (B/30, BTE 30, etc.)
+    result = re.sub(r'\bB/?(\d+)\b', '', result)
+    result = re.sub(r'\b(BTE|BOITE|PLQ)\s*\d+\b', '', result)
+
+    # 5. Nettoyer espaces multiples
+    result = re.sub(r'\s+', ' ', result).strip()
+
+    return result
+```
+
+### 4.2 Matching matriciel avec RapidFuzz
 
 ```python
 from rapidfuzz import process, fuzz
@@ -278,9 +382,9 @@ def batch_match_products(
 
     Performance: ~10,000 ventes vs ~50,000 BDPM en < 5 secondes
     """
-    # Extraction des noms
-    vente_names = [v['designation'] for v in ventes]
-    bdpm_names = [b['denomination'] for b in bdpm]
+    # OPTIMISATION : Preprocessing pharma avant matching
+    vente_names = [preprocess_pharma(v['designation']) for v in ventes]
+    bdpm_names = [preprocess_pharma(b['denomination']) for b in bdpm]
 
     # Calcul matriciel (utilise tous les CPU)
     scores = process.cdist(
@@ -318,7 +422,7 @@ def batch_match_products(
     return results
 ```
 
-### 4.2 Service de matching incremental
+### 4.3 Service de matching incremental
 
 ```python
 class MatchingService:
@@ -526,6 +630,8 @@ class MatchingService:
 
 ### 9.2 Tables de validation
 
+**OPTIMISATION** : Ajout du champ `auto_validated` et de seuils d'auto-validation par type de match pour reduire la charge de validation manuelle tout en gardant le controle.
+
 ```sql
 -- Validations en attente
 CREATE TABLE pending_validations (
@@ -539,7 +645,8 @@ CREATE TABLE pending_validations (
     proposed_groupe_id INT,
     match_score FLOAT,
     auto_source VARCHAR(50),               -- 'rapidfuzz', 'groupe_generique', 'bdpm_import'
-    status VARCHAR(20) DEFAULT 'pending',  -- 'pending', 'validated', 'rejected'
+    status VARCHAR(20) DEFAULT 'pending',  -- 'pending', 'validated', 'rejected', 'auto_validated'
+    auto_validated BOOLEAN DEFAULT FALSE,  -- True si valide automatiquement (score > seuil)
     created_at TIMESTAMP DEFAULT NOW(),
     validated_at TIMESTAMP
 );
@@ -547,7 +654,102 @@ CREATE TABLE pending_validations (
 CREATE INDEX idx_pending_status ON pending_validations(status);
 CREATE INDEX idx_pending_type ON pending_validations(validation_type);
 CREATE INDEX idx_pending_created ON pending_validations(created_at);
+CREATE INDEX idx_pending_auto ON pending_validations(auto_validated);
+```
 
+**Seuils d'auto-validation par type de match** :
+
+```python
+# Configuration des seuils d'auto-validation
+AUTO_VALIDATION_THRESHOLDS = {
+    # Fuzzy match : seuil eleve car moins fiable
+    'fuzzy_match': {
+        'score_min': 95.0,        # Score RapidFuzz minimum
+        'same_groupe': True,      # Doit etre dans le meme groupe_generique
+        'same_dosage': True,      # Doit avoir le meme dosage (extrait)
+    },
+    # Prix recupere du groupe : toujours auto-valide si meme groupe
+    'prix_groupe': {
+        'auto_validate': True,    # Toujours auto-valide (meme groupe = meme prix)
+    },
+    # Nouveau produit BDPM : jamais auto-valide
+    'nouveau_produit': {
+        'auto_validate': False,   # Toujours validation manuelle requise
+    },
+    # Match exact CIP : toujours auto-valide
+    'cip_exact': {
+        'auto_validate': True,    # CIP identique = 100% fiable
+    },
+    # Match groupe_generique_id : auto-valide si meme groupe
+    'groupe_generique': {
+        'auto_validate': True,    # Meme groupe = equivalents certifies ANSM
+    },
+}
+
+def should_auto_validate(match_type: str, score: float, context: dict) -> bool:
+    """
+    Determine si un match doit etre auto-valide selon les seuils.
+
+    Args:
+        match_type: Type de match ('fuzzy_match', 'prix_groupe', etc.)
+        score: Score du match (0-100)
+        context: Contexte additionnel (groupe_id source/cible, dosage, etc.)
+
+    Returns:
+        True si le match peut etre auto-valide
+    """
+    config = AUTO_VALIDATION_THRESHOLDS.get(match_type, {})
+
+    # Types toujours auto-valides
+    if config.get('auto_validate') is True:
+        return True
+
+    # Types jamais auto-valides
+    if config.get('auto_validate') is False:
+        return False
+
+    # Fuzzy match : verification multi-criteres
+    if match_type == 'fuzzy_match':
+        if score < config.get('score_min', 95.0):
+            return False
+        if config.get('same_groupe') and context.get('source_groupe') != context.get('target_groupe'):
+            return False
+        if config.get('same_dosage') and context.get('source_dosage') != context.get('target_dosage'):
+            return False
+        return True
+
+    return False
+```
+
+**Workflow avec auto-validation** :
+
+```
+Match detecte
+    |
+    v
+should_auto_validate() ?
+    |
+    +-- OUI --> INSERT pending_validations (status='auto_validated', auto_validated=True)
+    |           |
+    |           v
+    |           Log dans audit_logs (action='auto_validation')
+    |           |
+    |           v
+    |           Utilisable immediatement (pas de blocage)
+    |
+    +-- NON --> INSERT pending_validations (status='pending', auto_validated=False)
+                |
+                v
+                Blocage jusqu'a validation manuelle
+```
+
+**Avantages** :
+- Reduit drastiquement le nombre de validations manuelles
+- Les cas evidents (CIP exact, meme groupe) passent automatiquement
+- Les cas douteux (fuzzy < 95%) restent bloques
+- Tracabilite complete via `auto_validated` flag
+
+```sql
 -- Blacklist BDPM (produits supprimes definitivement)
 CREATE TABLE bdpm_blacklist (
     id SERIAL PRIMARY KEY,
@@ -902,26 +1104,26 @@ for p in products:
 </TableCell>
 ```
 
-### 10.7 Vue materialisee avec princeps
+### 10.7 Vue materialisee avec princeps (reference section 3.4)
 
+**Note** : La vue `mv_clusters_equivalences` est definie en detail dans la section 3.4.
+Elle inclut deja `princeps_cip13` et `princeps_ref` pour chaque groupe.
+
+**Resume des colonnes princeps disponibles** :
 ```sql
-CREATE MATERIALIZED VIEW mv_clusters_equivalences AS
+-- Extrait de mv_clusters_equivalences (voir section 3.4 pour definition complete)
 SELECT
     groupe_generique_id,
-    -- Princeps du groupe (type_generique = 0)
-    MAX(CASE WHEN type_generique = 0 THEN denomination END) as princeps_ref,
-    -- Tous les generiques du groupe
-    string_agg(
-        DISTINCT CASE WHEN type_generique != 0 THEN denomination END,
-        ' | '
-    ) as generiques,
-    -- Autres colonnes...
-    MAX(pfht) as pfht_groupe,
-    count(*) as nb_references
-FROM bdpm_equivalence
-WHERE groupe_generique_id IS NOT NULL
-GROUP BY groupe_generique_id;
+    princeps_cip13,    -- CIP13 du princeps referent
+    princeps_ref,      -- Denomination du princeps referent
+    equivalences,      -- Liste des generiques
+    ...
+FROM mv_clusters_equivalences;
 ```
+
+**Utilisation dans le drawer (section 12)** :
+- Le `princeps_cip13` permet d'afficher le CIP du princeps dans le drawer
+- Utile pour copier le CIP du princeps de reference
 
 ### 10.8 Checklist implementation
 
@@ -1032,7 +1234,83 @@ FROM bdpm_prix_historique
 WHERE date_changement > NOW() - INTERVAL '30 days';
 ```
 
-### 11.5 Frontend (optionnel)
+### 11.5 Frontend - Alerte variations prix significatives
+
+**OPTIMISATION** : Ajouter une alerte visible dans le header de la page BDPM quand des prix ont varie de plus de 10% lors du dernier import.
+
+**Bandeau d'alerte (header page Repertoire BDPM) :**
+```tsx
+// components/PriceAlertBanner.tsx
+import { AlertTriangle, TrendingUp, TrendingDown } from "lucide-react"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+
+interface PriceAlertBannerProps {
+  variations: {
+    total: number
+    hausses: number
+    baisses: number
+    variation_max: number
+  }
+}
+
+export function PriceAlertBanner({ variations }: PriceAlertBannerProps) {
+  if (variations.total === 0) return null
+
+  return (
+    <Alert variant="warning" className="mb-4 border-orange-300 bg-orange-50">
+      <AlertTriangle className="h-4 w-4" />
+      <AlertDescription className="flex items-center justify-between">
+        <span>
+          <strong>{variations.total} prix</strong> ont varie de plus de 10% ce mois :
+          {variations.hausses > 0 && (
+            <span className="ml-2 text-red-600">
+              <TrendingUp className="inline h-4 w-4" /> {variations.hausses} hausses
+            </span>
+          )}
+          {variations.baisses > 0 && (
+            <span className="ml-2 text-green-600">
+              <TrendingDown className="inline h-4 w-4" /> {variations.baisses} baisses
+            </span>
+          )}
+          <span className="ml-2 text-muted-foreground">
+            (max: {variations.variation_max > 0 ? '+' : ''}{variations.variation_max.toFixed(1)}%)
+          </span>
+        </span>
+        <Button variant="ghost" size="sm" asChild>
+          <a href="/repertoire?filter=price_changed">Voir details</a>
+        </Button>
+      </AlertDescription>
+    </Alert>
+  )
+}
+```
+
+**Endpoint API pour stats variations :**
+```python
+@router.get("/prix-variations/stats")
+async def get_price_variation_stats(db: Session = Depends(get_db)):
+    """
+    Retourne les stats de variation de prix du dernier mois.
+    Utilise pour le bandeau d'alerte dans le header.
+    """
+    result = db.execute(text("""
+        SELECT
+            COUNT(*) as total,
+            COUNT(*) FILTER (WHERE variation_pct > 10) as hausses,
+            COUNT(*) FILTER (WHERE variation_pct < -10) as baisses,
+            MAX(ABS(variation_pct)) as variation_max
+        FROM bdpm_prix_historique
+        WHERE date_changement > NOW() - INTERVAL '30 days'
+          AND ABS(variation_pct) > 10
+    """)).fetchone()
+
+    return {
+        "total": result.total or 0,
+        "hausses": result.hausses or 0,
+        "baisses": result.baisses or 0,
+        "variation_max": float(result.variation_max) if result.variation_max else 0
+    }
+```
 
 **Icone sur les produits avec historique :**
 ```tsx
@@ -1178,6 +1456,8 @@ Tables existantes              Vue materialisee            Composant
 
 ### 12.6 Endpoint API
 
+**OPTIMISATION** : Inclure `princeps_cip13` dans la reponse pour permettre l'affichage et la copie du CIP du princeps.
+
 ```python
 @router.get("/groupe/{groupe_id}/details")
 async def get_groupe_details(groupe_id: int, db: Session = Depends(get_db)):
@@ -1185,11 +1465,12 @@ async def get_groupe_details(groupe_id: int, db: Session = Depends(get_db)):
     Retourne les details d'un groupe generique pour le drawer.
     Utilise la vue materialisee pour performance instantanee.
     """
-    # Query sur vue materialisee
+    # Query sur vue materialisee (inclut princeps_cip13)
     cluster = db.execute(
         text("""
             SELECT
                 groupe_generique_id,
+                princeps_cip13,    -- CIP du princeps (nouveau)
                 princeps_ref,
                 equivalences,
                 cips,
@@ -1221,6 +1502,7 @@ async def get_groupe_details(groupe_id: int, db: Session = Depends(get_db)):
     return {
         "groupe_id": cluster.groupe_generique_id,
         "princeps": {
+            "cip13": cluster.princeps_cip13,     # CIP du princeps (nouveau)
             "denomination": cluster.princeps_ref,
             "pfht": float(cluster.pfht_groupe) if cluster.pfht_groupe else None
         },
@@ -1274,7 +1556,7 @@ export function GroupeDrawer({ groupeId, currentCip, open, onClose }: GroupeDraw
           </div>
         ) : (
           <div className="space-y-6 py-4">
-            {/* Princeps */}
+            {/* Princeps avec CIP */}
             <div>
               <h3 className="flex items-center gap-2 font-semibold mb-2">
                 <Star className="h-4 w-4 text-yellow-500" />
@@ -1282,9 +1564,23 @@ export function GroupeDrawer({ groupeId, currentCip, open, onClose }: GroupeDraw
               </h3>
               <div className="p-3 bg-blue-50 rounded-lg border border-blue-200">
                 <p className="font-bold">{data.princeps.denomination}</p>
-                <p className="text-sm text-muted-foreground">
-                  PFHT: {data.princeps.pfht?.toFixed(2)} €
-                </p>
+                <div className="flex items-center justify-between text-sm text-muted-foreground">
+                  <span>CIP: {data.princeps.cip13}</span>
+                  <span>PFHT: {data.princeps.pfht?.toFixed(2)} €</span>
+                </div>
+                {/* Bouton copier CIP princeps */}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="mt-2 h-7 text-xs"
+                  onClick={() => {
+                    navigator.clipboard.writeText(data.princeps.cip13)
+                    toast.success('CIP princeps copie')
+                  }}
+                >
+                  <Copy className="h-3 w-3 mr-1" />
+                  Copier CIP princeps
+                </Button>
               </div>
             </div>
 
@@ -1409,6 +1705,529 @@ function MesVentes() {
 
 ---
 
+## 13. LOGS ET AUDIT
+
+### 13.1 Objectif
+
+Tracer toutes les actions critiques pour :
+- Audit de securite et conformite
+- Debug et analyse d'incidents
+- Historique des modifications de donnees
+- Suivi des actions utilisateurs
+
+### 13.2 Table audit_logs
+
+```sql
+-- Table centrale des logs d'audit
+CREATE TABLE audit_logs (
+    id SERIAL PRIMARY KEY,
+    -- Identifiant unique de l'evenement
+    event_id UUID DEFAULT gen_random_uuid(),
+
+    -- Quand
+    created_at TIMESTAMP DEFAULT NOW(),
+
+    -- Qui
+    user_id INT,                           -- FK vers users (si authentification)
+    user_email VARCHAR(255),               -- Email pour tracabilite
+    ip_address INET,                       -- IP client
+    user_agent TEXT,                       -- Navigateur/client
+
+    -- Quoi
+    action VARCHAR(50) NOT NULL,           -- 'create', 'update', 'delete', 'validate', 'reject', 'import', 'export'
+    resource_type VARCHAR(50) NOT NULL,    -- 'matching', 'vente', 'simulation', 'catalogue', 'bdpm'
+    resource_id VARCHAR(100),              -- ID de la ressource concernee
+
+    -- Details
+    description TEXT,                      -- Description lisible de l'action
+    old_values JSONB,                      -- Valeurs avant modification
+    new_values JSONB,                      -- Valeurs apres modification
+    metadata JSONB,                        -- Donnees supplementaires contextuelles
+
+    -- Resultat
+    status VARCHAR(20) DEFAULT 'success',  -- 'success', 'failure', 'partial'
+    error_message TEXT                     -- Message d'erreur si echec
+);
+
+-- Index pour requetes frequentes
+CREATE INDEX idx_audit_created ON audit_logs(created_at DESC);
+CREATE INDEX idx_audit_action ON audit_logs(action);
+CREATE INDEX idx_audit_resource ON audit_logs(resource_type, resource_id);
+CREATE INDEX idx_audit_user ON audit_logs(user_email);
+CREATE INDEX idx_audit_status ON audit_logs(status);
+
+-- Index GIN pour recherche dans JSONB
+CREATE INDEX idx_audit_metadata ON audit_logs USING gin(metadata);
+```
+
+### 13.3 Actions a logger
+
+| Action | Resource Type | Description |
+|--------|---------------|-------------|
+| `validate` | `matching` | Validation d'un matching fuzzy |
+| `reject` | `matching` | Rejet d'un matching propose |
+| `auto_validate` | `matching` | Auto-validation (score > seuil) |
+| `import` | `vente` | Import fichier ventes |
+| `import` | `bdpm` | Synchronisation BDPM |
+| `delete` | `vente` | Suppression de ventes |
+| `create` | `simulation` | Creation d'une simulation |
+| `export` | `rapport` | Export PDF/Excel |
+| `blacklist` | `bdpm` | Ajout a la blacklist |
+| `price_update` | `bdpm` | Changement de prix detecte |
+
+### 13.4 Service de logging Python
+
+```python
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from fastapi import Request
+from typing import Optional, Dict, Any
+import json
+
+class AuditLogger:
+    """Service de logging d'audit."""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def log(
+        self,
+        action: str,
+        resource_type: str,
+        resource_id: Optional[str] = None,
+        description: Optional[str] = None,
+        old_values: Optional[Dict] = None,
+        new_values: Optional[Dict] = None,
+        metadata: Optional[Dict] = None,
+        request: Optional[Request] = None,
+        status: str = "success",
+        error_message: Optional[str] = None
+    ):
+        """
+        Enregistre un evenement d'audit.
+
+        Args:
+            action: Type d'action (create, update, delete, validate, etc.)
+            resource_type: Type de ressource (matching, vente, simulation, etc.)
+            resource_id: ID de la ressource concernee
+            description: Description lisible de l'action
+            old_values: Valeurs avant modification (pour update/delete)
+            new_values: Valeurs apres modification (pour create/update)
+            metadata: Donnees contextuelles supplementaires
+            request: Objet Request FastAPI pour extraire IP/user-agent
+            status: Resultat de l'action (success, failure, partial)
+            error_message: Message d'erreur si echec
+        """
+        # Extraire infos de la requete si disponible
+        user_email = None
+        ip_address = None
+        user_agent = None
+
+        if request:
+            # Extraire email depuis token JWT si auth implementee
+            user_email = getattr(request.state, 'user_email', None)
+            ip_address = request.client.host if request.client else None
+            user_agent = request.headers.get('user-agent')
+
+        self.db.execute(
+            text("""
+                INSERT INTO audit_logs (
+                    user_email, ip_address, user_agent,
+                    action, resource_type, resource_id,
+                    description, old_values, new_values, metadata,
+                    status, error_message
+                ) VALUES (
+                    :user_email, :ip_address, :user_agent,
+                    :action, :resource_type, :resource_id,
+                    :description, :old_values, :new_values, :metadata,
+                    :status, :error_message
+                )
+            """),
+            {
+                "user_email": user_email,
+                "ip_address": ip_address,
+                "user_agent": user_agent,
+                "action": action,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "description": description,
+                "old_values": json.dumps(old_values) if old_values else None,
+                "new_values": json.dumps(new_values) if new_values else None,
+                "metadata": json.dumps(metadata) if metadata else None,
+                "status": status,
+                "error_message": error_message
+            }
+        )
+        self.db.commit()
+
+
+# Utilisation dans les endpoints
+@router.post("/validations/{id}/validate")
+async def validate_matching(
+    id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    validation = db.query(PendingValidation).get(id)
+    if not validation:
+        raise HTTPException(404, "Validation non trouvee")
+
+    # Sauvegarder anciennes valeurs pour audit
+    old_values = {
+        "status": validation.status,
+        "validated_at": str(validation.validated_at) if validation.validated_at else None
+    }
+
+    # Effectuer la validation
+    validation.status = "validated"
+    validation.validated_at = datetime.now()
+    db.commit()
+
+    # Logger l'action
+    audit = AuditLogger(db)
+    audit.log(
+        action="validate",
+        resource_type="matching",
+        resource_id=str(id),
+        description=f"Validation du matching {validation.source_designation} -> {validation.proposed_designation}",
+        old_values=old_values,
+        new_values={"status": "validated", "validated_at": str(validation.validated_at)},
+        metadata={
+            "match_score": validation.match_score,
+            "match_type": validation.validation_type,
+            "source_cip": validation.source_cip13,
+            "proposed_cip": validation.proposed_cip13
+        },
+        request=request
+    )
+
+    return {"message": "Validation effectuee"}
+```
+
+### 13.5 Requetes d'analyse
+
+```sql
+-- 1. Actions des 7 derniers jours par type
+SELECT
+    action,
+    COUNT(*) as total,
+    COUNT(*) FILTER (WHERE status = 'success') as success,
+    COUNT(*) FILTER (WHERE status = 'failure') as failure
+FROM audit_logs
+WHERE created_at > NOW() - INTERVAL '7 days'
+GROUP BY action
+ORDER BY total DESC;
+
+-- 2. Activite par utilisateur
+SELECT
+    user_email,
+    COUNT(*) as nb_actions,
+    array_agg(DISTINCT action) as actions
+FROM audit_logs
+WHERE created_at > NOW() - INTERVAL '30 days'
+  AND user_email IS NOT NULL
+GROUP BY user_email
+ORDER BY nb_actions DESC;
+
+-- 3. Historique d'une ressource specifique
+SELECT
+    created_at,
+    action,
+    description,
+    old_values,
+    new_values,
+    user_email
+FROM audit_logs
+WHERE resource_type = 'matching'
+  AND resource_id = '12345'
+ORDER BY created_at DESC;
+
+-- 4. Erreurs recentes
+SELECT
+    created_at,
+    action,
+    resource_type,
+    error_message,
+    metadata
+FROM audit_logs
+WHERE status = 'failure'
+  AND created_at > NOW() - INTERVAL '24 hours'
+ORDER BY created_at DESC;
+```
+
+### 13.6 Retention et archivage
+
+```python
+# Politique de retention des logs
+AUDIT_RETENTION_DAYS = 365  # 1 an
+
+def archive_old_logs(db: Session):
+    """
+    Archive les logs de plus de 1 an vers une table d'archive.
+    Execute mensuellement via cron.
+    """
+    # Deplacer vers table archive
+    db.execute(text("""
+        INSERT INTO audit_logs_archive
+        SELECT * FROM audit_logs
+        WHERE created_at < NOW() - INTERVAL '365 days'
+    """))
+
+    # Supprimer de la table principale
+    db.execute(text("""
+        DELETE FROM audit_logs
+        WHERE created_at < NOW() - INTERVAL '365 days'
+    """))
+
+    db.commit()
+```
+
+### 13.7 Checklist implementation
+
+- [ ] **Etape 1** : Creer table `audit_logs` + index
+- [ ] **Etape 2** : Creer classe `AuditLogger` dans `backend/services/`
+- [ ] **Etape 3** : Integrer logging dans endpoint validation matching
+- [ ] **Etape 4** : Integrer logging dans import ventes
+- [ ] **Etape 5** : Integrer logging dans sync BDPM
+- [ ] **Etape 6** : Integrer logging dans exports
+- [ ] **Etape 7** : (Optionnel) Page admin visualisation logs
+
+---
+
+## 14. TESTS AUTOMATISES PERFORMANCE
+
+### 14.1 Objectif
+
+Valider que les optimisations atteignent les objectifs de performance :
+- Matching batch < 100ms pour 1000 ventes
+- Lookup cache < 10ms
+- Vue materialisee < 5ms
+
+### 14.2 Structure des tests
+
+```python
+# tests/performance/test_matching_performance.py
+import pytest
+import time
+from unittest.mock import patch
+from app.services.matching_service import MatchingService, batch_match_products
+
+
+class TestMatchingPerformance:
+    """Tests de performance du systeme de matching."""
+
+    @pytest.fixture
+    def sample_ventes(self):
+        """Genere 1000 ventes de test."""
+        return [
+            {"cip13": f"340093{i:07d}", "designation": f"PRODUIT TEST {i}"}
+            for i in range(1000)
+        ]
+
+    @pytest.fixture
+    def sample_bdpm(self):
+        """Genere 50000 references BDPM de test."""
+        return [
+            {"cip13": f"340094{i:07d}", "denomination": f"MEDICAMENT BDPM {i}", "pfht": 2.50}
+            for i in range(50000)
+        ]
+
+    def test_batch_matching_under_100ms(self, sample_ventes, sample_bdpm):
+        """
+        OBJECTIF : Batch matching de 1000 ventes vs 50000 BDPM < 100ms
+        """
+        start = time.perf_counter()
+        results = batch_match_products(sample_ventes, sample_bdpm, score_threshold=70.0)
+        elapsed = (time.perf_counter() - start) * 1000  # en ms
+
+        assert elapsed < 100, f"Batch matching trop lent: {elapsed:.2f}ms (objectif: <100ms)"
+        assert len(results) == 1000, f"Nombre de resultats incorrect: {len(results)}"
+        print(f"✓ Batch matching 1000 ventes: {elapsed:.2f}ms")
+
+    def test_cache_lookup_under_10ms(self, db_session):
+        """
+        OBJECTIF : Lookup cache (CIP connu) < 10ms
+        """
+        service = MatchingService(db_session)
+
+        # Pre-remplir le cache avec des donnees
+        service._cache = {
+            f"340093{i:07d}": {"matched_cip13": f"340094{i:07d}", "match_score": 95.0}
+            for i in range(10000)
+        }
+
+        # Mesurer 1000 lookups consecutifs
+        start = time.perf_counter()
+        for i in range(1000):
+            result = service.get_or_compute_match(f"340093{i:07d}", f"PRODUIT {i}")
+        elapsed = (time.perf_counter() - start) * 1000
+
+        avg_per_lookup = elapsed / 1000
+        assert avg_per_lookup < 10, f"Lookup cache trop lent: {avg_per_lookup:.2f}ms (objectif: <10ms)"
+        print(f"✓ Lookup cache moyen: {avg_per_lookup:.4f}ms")
+
+
+class TestMaterializedViewPerformance:
+    """Tests de performance des vues materialisees."""
+
+    def test_clusters_lookup_under_5ms(self, db_session):
+        """
+        OBJECTIF : Requete mv_clusters_equivalences < 5ms
+        """
+        # Creer des donnees de test si necessaire
+        # ...
+
+        start = time.perf_counter()
+        result = db_session.execute(text("""
+            SELECT *
+            FROM mv_clusters_equivalences
+            WHERE groupe_generique_id = 1234
+        """)).fetchone()
+        elapsed = (time.perf_counter() - start) * 1000
+
+        assert elapsed < 5, f"Lookup vue materialisee trop lent: {elapsed:.2f}ms (objectif: <5ms)"
+        print(f"✓ Lookup mv_clusters_equivalences: {elapsed:.2f}ms")
+
+    def test_refresh_under_30s(self, db_session):
+        """
+        OBJECTIF : Refresh vue materialisee < 30 secondes
+        """
+        start = time.perf_counter()
+        db_session.execute(text("""
+            REFRESH MATERIALIZED VIEW CONCURRENTLY mv_clusters_equivalences
+        """))
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 30, f"Refresh vue trop lent: {elapsed:.2f}s (objectif: <30s)"
+        print(f"✓ Refresh mv_clusters_equivalences: {elapsed:.2f}s")
+
+
+class TestPreprocessingPerformance:
+    """Tests de performance du preprocessing."""
+
+    def test_preprocess_pharma_batch_under_50ms(self):
+        """
+        OBJECTIF : Preprocessing de 1000 noms < 50ms
+        """
+        from app.services.intelligent_matching import preprocess_pharma
+
+        test_names = [
+            "AMLODIPINE BIOGARAN 5MG CPR B/30",
+            "METFORMINE EG 850MG B/90",
+            "LOSARTAN ARROW 50MG COMPRIME",
+        ] * 333 + ["DOLIPRANE 1000MG"]  # = 1000 noms
+
+        start = time.perf_counter()
+        for name in test_names:
+            preprocess_pharma(name)
+        elapsed = (time.perf_counter() - start) * 1000
+
+        assert elapsed < 50, f"Preprocessing trop lent: {elapsed:.2f}ms (objectif: <50ms)"
+        print(f"✓ Preprocessing 1000 noms: {elapsed:.2f}ms")
+```
+
+### 14.3 Configuration pytest
+
+```ini
+# pytest.ini
+[pytest]
+markers =
+    performance: tests de performance (deselect with '-m "not performance"')
+    slow: tests lents (>1s)
+
+testpaths = tests
+python_files = test_*.py
+python_functions = test_*
+
+# Options par defaut
+addopts = -v --tb=short
+```
+
+### 14.4 Script d'execution
+
+```bash
+#!/bin/bash
+# scripts/run_perf_tests.sh
+
+echo "=== Tests de performance Pharma-Remises ==="
+echo ""
+
+# Preparer l'environnement de test
+export DATABASE_URL="postgresql://localhost/pharma_remises_test"
+
+# Executer les tests de performance
+pytest tests/performance/ -v -m performance --tb=short
+
+# Generer rapport
+pytest tests/performance/ -v -m performance --html=reports/perf_report.html
+
+echo ""
+echo "=== Rapport genere dans reports/perf_report.html ==="
+```
+
+### 14.5 Integration CI/CD
+
+```yaml
+# .github/workflows/performance.yml
+name: Performance Tests
+
+on:
+  push:
+    branches: [main, develop]
+  schedule:
+    - cron: '0 6 * * 1'  # Chaque lundi a 6h
+
+jobs:
+  performance:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: pharma_test
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-html
+
+      - name: Run performance tests
+        run: |
+          pytest tests/performance/ -v -m performance --html=perf_report.html
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/pharma_test
+
+      - name: Upload report
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-report
+          path: perf_report.html
+```
+
+### 14.6 Checklist implementation
+
+- [ ] **Etape 1** : Creer dossier `tests/performance/`
+- [ ] **Etape 2** : Implementer `test_matching_performance.py`
+- [ ] **Etape 3** : Implementer `test_materialized_view_performance.py`
+- [ ] **Etape 4** : Configurer `pytest.ini` avec markers
+- [ ] **Etape 5** : Creer script `run_perf_tests.sh`
+- [ ] **Etape 6** : (Optionnel) Configurer CI/CD GitHub Actions
+
+---
+
 **Date de creation** : 2024-12-21
-**Mise a jour** : 2024-12-22 - Ajout section 12 (Drawer Groupe Generique)
+**Mise a jour** : 2024-12-22 - Ajout sections 13 (Audit) et 14 (Tests Performance)
 **Statut** : A valider avant implementation
