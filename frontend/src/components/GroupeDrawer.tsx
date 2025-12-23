@@ -5,7 +5,31 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Star, Copy, ExternalLink } from 'lucide-react'
 import { toast } from 'sonner'
-import { api } from '@/lib/api'
+import api from '@/lib/api'
+
+interface GroupeEquivalent {
+  cip13: string
+  denomination: string
+  labo?: string
+  pfht?: number
+}
+
+interface GroupePrinceps {
+  cip13: string
+  denomination: string
+  pfht?: number
+}
+
+interface GroupeStats {
+  nb_references: number
+  nb_labos: number
+}
+
+interface GroupeDetailsResponse {
+  princeps?: GroupePrinceps
+  equivalents: GroupeEquivalent[]
+  stats: GroupeStats
+}
 
 interface GroupeDrawerProps {
   groupeId: number | null
@@ -15,15 +39,15 @@ interface GroupeDrawerProps {
 }
 
 export function GroupeDrawer({ groupeId, currentCip, open, onClose }: GroupeDrawerProps) {
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error } = useQuery<GroupeDetailsResponse>({
     queryKey: ['groupe-details', groupeId],
-    queryFn: () => api.get(`/api/groupe/${groupeId}/details`).then(r => r.data),
+    queryFn: () => api.get(`/api/groupe/${groupeId}/details`).then((r: { data: GroupeDetailsResponse }) => r.data),
     enabled: !!groupeId && open
   })
 
   const copyAllCips = () => {
     if (!data?.equivalents) return
-    const cips = data.equivalents.map((e: any) => e.cip13).join('\n')
+    const cips = data.equivalents.map((e) => e.cip13).join('\n')
     navigator.clipboard.writeText(cips)
     toast.success('CIP copies dans le presse-papier')
   }
@@ -77,7 +101,7 @@ export function GroupeDrawer({ groupeId, currentCip, open, onClose }: GroupeDraw
                     variant="ghost"
                     size="sm"
                     className="mt-2 h-7 text-xs"
-                    onClick={() => copyCip(data.princeps.cip13)}
+                    onClick={() => data.princeps && copyCip(data.princeps.cip13)}
                   >
                     <Copy className="h-3 w-3 mr-1" />
                     Copier CIP
@@ -104,7 +128,7 @@ export function GroupeDrawer({ groupeId, currentCip, open, onClose }: GroupeDraw
                 Equivalents Generiques ({data.equivalents.length})
               </h3>
               <div className="max-h-[400px] overflow-y-auto space-y-1">
-                {data.equivalents.map((equiv: any) => (
+                {data.equivalents.map((equiv) => (
                   <div
                     key={equiv.cip13}
                     className={`p-2 rounded flex justify-between items-center ${

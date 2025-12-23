@@ -20,8 +20,8 @@ interface FilterConfig {
 
 interface FilterBarProps {
   filters: FilterConfig[]
-  values: Record<string, any>
-  onChange: (key: string, value: any) => void
+  values: Record<string, string>
+  onChange: (key: string, value: string) => void
   onReset: () => void
 }
 

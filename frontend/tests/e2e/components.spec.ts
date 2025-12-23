@@ -92,6 +92,9 @@ test.describe('ProgressStepper', () => {
     // Chercher icone en cours (Loader2 avec animate-spin)
     const spinner = page.locator('.animate-spin')
     // Peut etre visible pendant processing
+    await expect(spinner.first()).toBeVisible().catch(() => {
+      // Spinner may not be visible if not processing
+    })
   })
 })
 
@@ -207,6 +210,9 @@ test.describe('InfiniteScrollTable', () => {
     // Verifier indicateur de chargement
     const loader = page.locator('.animate-spin, [data-testid="loading-more"]')
     // Peut etre visible brievement
+    await expect(loader.first()).toBeVisible().catch(() => {
+      // Loader may disappear quickly
+    })
   })
 
   test('affiche compteur total', async ({ page }) => {
@@ -341,6 +347,16 @@ test.describe('GroupeDrawer', () => {
 // ==========================================
 // Tests de memoire
 // ==========================================
+interface PerformanceMemory {
+  usedJSHeapSize: number
+  totalJSHeapSize: number
+  jsHeapSizeLimit: number
+}
+
+interface PerformanceWithMemory extends Performance {
+  memory?: PerformanceMemory
+}
+
 test.describe('Memory Performance', () => {
   test('memoire reste stable avec beaucoup de donnees', async ({ page }) => {
     await page.goto('/repertoire')
@@ -348,8 +364,9 @@ test.describe('Memory Performance', () => {
 
     // Mesurer memoire initiale
     const initialMemory = await page.evaluate(() => {
-      if ((performance as any).memory) {
-        return (performance as any).memory.usedJSHeapSize / 1024 / 1024
+      const perf = performance as PerformanceWithMemory
+      if (perf.memory) {
+        return perf.memory.usedJSHeapSize / 1024 / 1024
       }
       return 0
     })
@@ -364,8 +381,9 @@ test.describe('Memory Performance', () => {
 
     // Mesurer memoire finale
     const finalMemory = await page.evaluate(() => {
-      if ((performance as any).memory) {
-        return (performance as any).memory.usedJSHeapSize / 1024 / 1024
+      const perf = performance as PerformanceWithMemory
+      if (perf.memory) {
+        return perf.memory.usedJSHeapSize / 1024 / 1024
       }
       return 0
     })

@@ -34,7 +34,7 @@ export function VirtualizedTable<T>({
   selectedRowId,
   isLoading = false,
   emptyMessage = 'Aucune donnee',
-  getRowId = (row: any) => row.id
+  getRowId = (row: T) => (row as T & { id: string | number }).id
 }: VirtualizedTableProps<T>) {
   const parentRef = useRef<HTMLDivElement>(null)
 
@@ -107,7 +107,7 @@ export function VirtualizedTable<T>({
                     className="px-4 py-2 truncate text-sm"
                     style={{ width: col.width || 'auto', flex: col.width ? 'none' : 1 }}
                   >
-                    {col.render ? col.render(item) : (item as any)[col.key]}
+                    {col.render ? col.render(item) : String((item as Record<string, unknown>)[col.key] ?? '')}
                   </div>
                 ))}
               </div>
