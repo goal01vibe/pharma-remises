@@ -12,6 +12,8 @@ from .models import (
     Parametre,
     VenteMatching,
     BdpmEquivalence,
+    MatchingMemory,
+    BdpmFileStatus,
 )
 
 __all__ = [
@@ -28,4 +30,6 @@ __all__ = [
     "Parametre",
     "VenteMatching",
     "BdpmEquivalence",
+    "MatchingMemory",
+    "BdpmFileStatus",
 ]

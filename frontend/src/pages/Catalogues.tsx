@@ -173,6 +173,20 @@ export function Catalogues() {
     return { label: `${remontee_pct}%`, color: 'text-orange-600', icon: AlertCircle }
   }
 
+  // Couleur du prix selon l'origine: noir=catalogue, bleu=bdpm, vert=bdm_it
+  const getPriceSourceStyle = (prix_source: string | null | undefined) => {
+    switch (prix_source) {
+      case 'catalogue':
+        return { color: '', title: 'Prix catalogue' }
+      case 'bdpm':
+        return { color: 'text-blue-600', title: 'Prix BDPM' }
+      case 'bdm_it':
+        return { color: 'text-emerald-600', title: 'Prix BDM-IT (CNAM)' }
+      default:
+        return { color: 'text-muted-foreground', title: 'Source inconnue' }
+    }
+  }
+
   return (
     <div className="flex flex-col">
       <Header
@@ -322,6 +336,8 @@ export function Catalogues() {
                 <TableBody>
                   {filteredAndSortedCatalogue.slice(0, DISPLAY_LIMIT).map((produit, index) => {
                     const status = getRemonteeStatus(produit.remontee_pct)
+                    const priceStyle = getPriceSourceStyle(produit.prix_source)
+                    const displayPrice = produit.prix_ht ?? produit.prix_fabricant
                     return (
                       <TableRow
                         key={produit.id}
@@ -347,11 +363,11 @@ export function Catalogues() {
                           )}
                         </TableCell>
                         <TableCell className="text-right">
-                          {produit.prix_ht
-                            ? formatCurrency(produit.prix_ht)
-                            : produit.prix_fabricant
-                              ? <span className="text-muted-foreground">{formatCurrency(produit.prix_fabricant)}</span>
-                              : '-'}
+                          {displayPrice ? (
+                            <span className={priceStyle.color} title={priceStyle.title}>
+                              {formatCurrency(displayPrice)}
+                            </span>
+                          ) : '-'}
                         </TableCell>
                         <TableCell className="text-right">
                           {produit.remise_pct ? formatPercent(produit.remise_pct) : '-'}

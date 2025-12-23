@@ -20,6 +20,7 @@ from app.api import (
     coverage_router,
     reports_router,
     optimization_router,
+    repertoire_router,
 )
 
 
@@ -61,6 +62,7 @@ app.include_router(matching_router)
 app.include_router(coverage_router)
 app.include_router(reports_router)
 app.include_router(optimization_router)
+app.include_router(repertoire_router)
 
 
 @app.get("/")

@@ -81,6 +81,7 @@ class CatalogueProduitBase(BaseModel):
     conditionnement: Optional[int] = None
     type_generique: Optional[str] = None  # 'princeps', 'generique', 'complementaire'
     prix_fabricant: Optional[Decimal] = None
+    prix_source: Optional[str] = None  # 'catalogue', 'bdpm', 'bdm_it' - origine du prix
 
 
 class CatalogueProduitCreate(CatalogueProduitBase):

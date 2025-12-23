@@ -301,9 +301,9 @@ export function MatchingDetails() {
           <div className="text-center">
             {row.original.match_score ? (
               <Badge
-                variant={row.original.match_score >= 90 ? 'default' : row.original.match_score >= 70 ? 'secondary' : 'outline'}
+                variant={Number(row.original.match_score) >= 90 ? 'default' : Number(row.original.match_score) >= 70 ? 'secondary' : 'outline'}
               >
-                {row.original.match_score.toFixed(0)}%
+                {Number(row.original.match_score).toFixed(0)}%
               </Badge>
             ) : (
               '-'
@@ -532,8 +532,17 @@ export function MatchingDetails() {
                     {hasMore && (
                       <TableRow>
                         <TableCell colSpan={columns.length} className="text-center py-4">
-                          <div ref={loaderRef} className="text-muted-foreground text-sm">
-                            Chargement... ({visibleRows.length}/{allRows.length})
+                          <div ref={loaderRef} className="flex flex-col items-center gap-2">
+                            <span className="text-muted-foreground text-sm">
+                              {visibleRows.length} / {allRows.length} lignes affichées
+                            </span>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={loadMore}
+                            >
+                              Charger 100 de plus
+                            </Button>
                           </div>
                         </TableCell>
                       </TableRow>

@@ -1,0 +1,51 @@
+# Dependencies (seront installees dans le container ou via volume)
+node_modules/
+frontend/node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Environnement virtuel Python
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Logs et cache
+*.log
+.cache/
+.npm/
+
+# Fichiers de test
+test_*.csv
+*.xlsx
+!catalogue_generique_bdpm.xlsx
+
+# Variables d'environnement (sensibles)
+.env
+.env.local
+.env.*.local
+
+# Build frontend
+frontend/dist/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Documentation
+*.md
+!README.md
+
+# Donnees locales
+backend/data/

@@ -86,6 +86,7 @@ class CatalogueProduit(Base):
     conditionnement = Column(Integer, nullable=True)  # ex: 30, 90
     type_generique = Column(String(20), nullable=True)  # 'princeps', 'generique', 'complementaire'
     prix_fabricant = Column(Numeric(10, 2), nullable=True)  # Prix HT fabricant BDPM
+    prix_source = Column(String(20), nullable=True)  # 'catalogue', 'bdpm', 'bdm_it' - origine du prix
     code_cis = Column(String(20), nullable=True)  # Code CIS pour le croisement
 
     # Relations
@@ -285,4 +286,52 @@ class BdpmEquivalence(Base):
     libelle_groupe = Column(String(500), nullable=True)  # "AMOXICILLINE + ACIDE CLAVULANIQUE 100mg..."
     type_generique = Column(Integer, nullable=True)  # 0=princeps, 1=generique
     pfht = Column(Numeric(10, 2), nullable=True)  # Prix Fabricant HT (BDPM)
+    denomination = Column(String(500), nullable=True)  # Nom complet du medicament
+    princeps_denomination = Column(String(500), nullable=True)  # Nom du princeps du groupe
+    absent_bdpm = Column(Boolean, default=False)  # True si absent de la derniere BDPM
+    match_origin = Column(String(50), nullable=True)  # 'bdpm' (import), 'fuzzy' (user validated)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class MatchingMemory(Base):
+    """Memoire de matching persistante avec groupes d'equivalence transitifs.
+
+    Si A match B et B match C, alors A, B, C sont dans le meme groupe.
+    Permet un matching instantane pour les futurs rapprochements.
+    """
+    __tablename__ = "matching_memory"
+
+    id = Column(Integer, primary_key=True, index=True)
+    groupe_equivalence_id = Column(Integer, nullable=False, index=True)  # Groupe transitif
+    cip13 = Column(String(13), nullable=False, unique=True, index=True)  # Code CIP unique
+    designation = Column(String(500), nullable=True)  # Nom du produit
+    source = Column(String(50), nullable=True)  # 'vente', 'catalogue', 'bdpm'
+    source_id = Column(Integer, nullable=True)  # ID dans la table source
+    groupe_generique_id = Column(Integer, nullable=True, index=True)  # Groupe BDPM si connu
+    match_origin = Column(String(100), nullable=True)  # 'exact_cip', 'groupe_generique', 'fuzzy', 'manuel'
+    match_score = Column(Numeric(5, 2), nullable=True)  # Score du match initial
+    validated = Column(Boolean, default=False)  # Valide par l'utilisateur
+    validated_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class BdpmFileStatus(Base):
+    """Statut des fichiers BDPM telecharges (hash, dates, stats).
+
+    Permet de verifier si une mise a jour est necessaire sans retelecharger.
+    """
+    __tablename__ = "bdpm_file_status"
+
+    id = Column(Integer, primary_key=True, index=True)
+    filename = Column(String(100), nullable=False, unique=True)  # 'CIS_bdpm.txt', etc.
+    file_url = Column(String(500), nullable=True)  # URL de telechargement
+    file_hash = Column(String(64), nullable=True)  # SHA256 du fichier
+    file_size = Column(Integer, nullable=True)  # Taille en octets
+    last_checked = Column(DateTime(timezone=True), nullable=True)  # Derniere verification
+    last_downloaded = Column(DateTime(timezone=True), nullable=True)  # Dernier telechargement
+    last_integrated = Column(DateTime(timezone=True), nullable=True)  # Derniere integration
+    records_count = Column(Integer, nullable=True)  # Nombre d'enregistrements
+    new_records = Column(Integer, default=0)  # Nouveaux depuis derniere integration
+    removed_records = Column(Integer, default=0)  # Absents depuis derniere integration
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

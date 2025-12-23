@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { Toaster } from 'sonner'
 import { Layout } from '@/components/layout/Layout'
 import { Dashboard } from '@/pages/Dashboard'
 import { Laboratoires } from '@/pages/Laboratoires'
@@ -12,6 +13,8 @@ import { Optimization } from '@/pages/Optimization'
 import { Comparaison } from '@/pages/Comparaison'
 import { Import } from '@/pages/Import'
 import { Parametres } from '@/pages/Parametres'
+import RepertoireGenerique from '@/pages/RepertoireGenerique'
+import RapprochementVentes from '@/pages/RapprochementVentes'
 import './index.css'
 
 const queryClient = new QueryClient({
@@ -26,6 +29,7 @@ const queryClient = new QueryClient({
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
+      <Toaster position="top-right" richColors />
       <BrowserRouter>
         <Routes>
           <Route element={<Layout />}>
@@ -40,6 +44,8 @@ function App() {
             <Route path="/optimization" element={<Optimization />} />
             <Route path="/import" element={<Import />} />
             <Route path="/parametres" element={<Parametres />} />
+            <Route path="/repertoire" element={<RepertoireGenerique />} />
+            <Route path="/repertoire/rapprochement" element={<RapprochementVentes />} />
           </Route>
         </Routes>
       </BrowserRouter>

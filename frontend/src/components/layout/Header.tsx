@@ -1,5 +1,6 @@
 import { Bell, User } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { BdpmStatusBadge } from './BdpmStatusBadge'
 
 interface HeaderProps {
   title: string
@@ -15,7 +16,8 @@ export function Header({ title, description }: HeaderProps) {
           <p className="text-sm text-muted-foreground">{description}</p>
         )}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-3">
+        <BdpmStatusBadge />
         <Button variant="ghost" size="icon">
           <Bell className="h-5 w-5" />
         </Button>

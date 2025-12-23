@@ -307,11 +307,14 @@ async def confirm_catalogue_import(
         # 1. Creer les nouveaux produits
         if apply_nouveaux:
             for item in preview_data["nouveaux"]:
+                prix_ht = item.get("prix_ht_import")
                 produit = CatalogueProduit(
                     laboratoire_id=labo_id,
                     code_cip=item.get("code_cip"),
                     nom_commercial=item.get("designation"),
-                    prix_ht=item.get("prix_ht_import"),
+                    prix_ht=prix_ht,
+                    prix_fabricant=prix_ht,  # Copier prix catalogue
+                    prix_source='catalogue' if prix_ht else None,  # Marquer origine
                     remise_pct=item.get("remise_pct_import"),
                     source="manuel",
                 )
@@ -335,6 +338,8 @@ async def confirm_catalogue_import(
                     for change in item.get("changes", []):
                         if change["champ"] == "prix_ht" and change["nouveau"] is not None:
                             produit.prix_ht = change["nouveau"]
+                            produit.prix_fabricant = change["nouveau"]  # Maj prix fabricant
+                            produit.prix_source = 'catalogue'  # Marquer origine
                         elif change["champ"] == "remise_pct" and change["nouveau"] is not None:
                             produit.remise_pct = change["nouveau"]
                     nb_maj += 1

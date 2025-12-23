@@ -364,6 +364,7 @@ export interface ProcessSalesRequest {
   import_id: number
   min_score?: number
   labo_ids?: number[]  // Liste des labos a matcher (si vide = tous)
+  force_rematch?: boolean  // Si true, relance le matching meme si deja fait
 }
 
 export interface ProcessSalesResponse {
@@ -486,7 +487,11 @@ export interface SearchProductsResponse {
 
 export const intelligentMatchingApi = {
   processSales: async (request: ProcessSalesRequest): Promise<ProcessSalesResponse> => {
-    const { data } = await api.post('/api/matching/process-sales', request)
+    const { force_rematch, ...bodyRequest } = request
+    const { data } = await api.post(
+      `/api/matching/process-sales${force_rematch ? '?force_rematch=true' : ''}`,
+      bodyRequest
+    )
     return data
   },
 
@@ -905,6 +910,208 @@ export const optimizationApi = {
     const { data } = await api.post('/api/optimization/run', request, {
       params: { include_ventes: includeVentes || false },
     })
+    return data
+  },
+}
+
+// ===================
+// REPERTOIRE GENERIQUE
+// ===================
+export interface RepertoireItem {
+  cip13: string
+  cis: string | null
+  groupe_generique_id: number | null
+  libelle_groupe: string | null
+  type_generique: number | null  // 0=princeps, 1=generique
+  pfht: number | null
+  denomination: string | null  // Nom complet du medicament
+  princeps_denomination: string | null  // Nom du princeps du groupe
+  absent_bdpm: boolean
+  match_origin: 'bdpm' | 'fuzzy' | null  // Origin of the match
+}
+
+export interface RattachementItem {
+  vente_id: number
+  cip13: string
+  groupe_generique_id: number
+}
+
+export interface RattachementResponse {
+  rattaches: number
+  erreurs: Array<{ vente_id: number; erreur: string }>
+  message: string
+}
+
+export interface RepertoireStats {
+  total_cips: number
+  total_groupes: number
+  princeps: number
+  generiques: number
+  avec_prix: number
+  sans_prix: number
+  absents: number
+}
+
+export interface BdpmStatus {
+  status: 'ok' | 'warning' | 'outdated' | 'unknown'
+  message: string
+  last_checked: string | null
+  last_updated: string | null
+  files: Array<{
+    filename: string
+    last_checked: string | null
+    last_downloaded: string | null
+    records_count: number | null
+    new_records: number
+    removed_records: number
+  }>
+}
+
+export interface RapprochementResultItem {
+  vente_id: number
+  cip13: string | null
+  designation: string
+  quantite: number
+  montant_ht: number
+  status: 'valide' | 'a_supprimer' | 'a_rattacher'
+  pfht: number | null
+  raison_suppression: 'princeps' | 'cip_non_trouve' | 'sans_prix' | null
+  groupe_generique_id: number | null
+  type_generique: number | null
+  match_origin: 'exact' | 'fuzzy' | null
+}
+
+export interface GroupeMembre {
+  cip13: string
+  denomination: string | null
+  type_generique: number | null
+  pfht: number | null
+}
+
+export interface PropositionRattachement {
+  vente_id: number
+  cip13: string | null
+  designation: string
+  quantite: number
+  montant_ht: number
+  groupe_generique_id: number
+  libelle_groupe: string
+  fuzzy_score: number
+  membres_groupe: GroupeMembre[]
+  pfht_propose: number | null
+}
+
+export interface RapprochementResult {
+  valides: RapprochementResultItem[]
+  a_supprimer: RapprochementResultItem[]
+  propositions_rattachement: PropositionRattachement[]
+  stats: {
+    total_ventes: number
+    valides: number
+    a_supprimer: number
+    propositions: number
+    princeps: number
+    cip_non_trouve: number
+    sans_prix: number
+  }
+}
+
+export interface MemoryStats {
+  total_cips: number
+  total_groupes: number
+  validated: number
+  pending_validation: number
+}
+
+export const repertoireApi = {
+  // Repertoire
+  list: async (params?: {
+    skip?: number
+    limit?: number
+    search?: string
+    groupe_id?: number
+    type_generique?: number
+    has_price?: boolean
+    only_with_groupe?: boolean
+    sort_by?: string
+    sort_order?: 'asc' | 'desc'
+  }): Promise<RepertoireItem[]> => {
+    const { data } = await api.get('/repertoire/', { params })
+    return data
+  },
+
+  getStats: async (onlyWithGroupe?: boolean): Promise<RepertoireStats> => {
+    const { data } = await api.get('/repertoire/stats', { params: { only_with_groupe: onlyWithGroupe } })
+    return data
+  },
+
+  getGroupes: async (params?: { skip?: number; limit?: number; search?: string }): Promise<Array<{ groupe_generique_id: number; libelle_groupe: string; nb_cips: number; nb_princeps: number }>> => {
+    const { data } = await api.get('/repertoire/groupes', { params })
+    return data
+  },
+
+  // BDPM Status
+  getBdpmStatus: async (): Promise<BdpmStatus> => {
+    const { data } = await api.get('/repertoire/bdpm/status')
+    return data
+  },
+
+  checkBdpmUpdates: async (force?: boolean): Promise<{ checked: boolean; files_updated: number; new_cips: number; removed_cips: number; details: unknown[] }> => {
+    const { data } = await api.post('/repertoire/bdpm/check', null, { params: { force } })
+    return data
+  },
+
+  getAbsentCips: async (): Promise<Array<{ cip13: string; cis: string; libelle_groupe: string; type_generique: number }>> => {
+    const { data } = await api.get('/repertoire/bdpm/absents')
+    return data
+  },
+
+  deleteAbsentCips: async (cip13List: string[]): Promise<{ deleted: number }> => {
+    const { data } = await api.delete('/repertoire/bdpm/absents', { data: cip13List })
+    return data
+  },
+
+  uploadBdpmFiles: async (files: File[]): Promise<{
+    files_uploaded: Array<{ filename: string; status: string; message: string }>
+    integration: { new_cips: number; updated_cips: number; marked_absent: number } | null
+  }> => {
+    const formData = new FormData()
+    files.forEach(file => formData.append('files', file))
+    const { data } = await api.post('/repertoire/bdpm/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+    return data
+  },
+
+  // Rapprochement
+  rapprocher: async (importId?: number): Promise<RapprochementResult> => {
+    const { data } = await api.post('/repertoire/rapprochement', { import_id: importId })
+    return data
+  },
+
+  validerRapprochement: async (venteIds: number[], action: 'validate_match' | 'delete'): Promise<{ action: string; validated?: number; deleted?: number }> => {
+    const { data } = await api.post('/repertoire/rapprochement/valider', { vente_ids: venteIds, action })
+    return data
+  },
+
+  rattacherFuzzy: async (rattachements: RattachementItem[]): Promise<RattachementResponse> => {
+    const { data } = await api.post('/repertoire/rapprochement/rattacher', { rattachements })
+    return data
+  },
+
+  // Memoire Matching
+  getMemoryStats: async (): Promise<MemoryStats> => {
+    const { data } = await api.get('/repertoire/memory/stats')
+    return data
+  },
+
+  getEquivalents: async (cip13: string): Promise<Array<{ cip13: string; designation: string; source: string; groupe_generique_id: number | null; match_origin: string; match_score: number | null; validated: boolean }>> => {
+    const { data } = await api.get(`/repertoire/memory/equivalents/${cip13}`)
+    return data
+  },
+
+  populateFromBdpm: async (): Promise<{ groupes_processed: number; cips_added: number; groupes_created: number }> => {
+    const { data } = await api.post('/repertoire/memory/populate-from-bdpm')
     return data
   },
 }

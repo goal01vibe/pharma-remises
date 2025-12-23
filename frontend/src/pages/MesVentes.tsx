@@ -109,7 +109,13 @@ export function MesVentes() {
     setSearchParams({ import_id: value })
   }
 
-  const totalMontant = ventes.reduce((sum, v) => sum + (v.montant_annuel || 0), 0)
+  // Calculer le montant: utiliser montant_annuel si dispo, sinon prix_bdpm × quantité
+  const getMontant = (v: typeof ventes[0]) => {
+    if (v.montant_annuel) return v.montant_annuel
+    if (v.prix_bdpm && v.quantite_annuelle) return v.prix_bdpm * v.quantite_annuelle
+    return 0
+  }
+  const totalMontant = ventes.reduce((sum, v) => sum + getMontant(v), 0)
   const totalQuantite = ventes.reduce((sum, v) => sum + (v.quantite_annuelle || 0), 0)
 
   return (
@@ -285,7 +291,7 @@ export function MesVentes() {
                         )}
                       </TableCell>
                       <TableCell className="text-right font-medium">
-                        {vente.montant_annuel ? formatCurrency(vente.montant_annuel) : '-'}
+                        {getMontant(vente) > 0 ? formatCurrency(getMontant(vente)) : '-'}
                       </TableCell>
                       <TableCell>
                         <Button

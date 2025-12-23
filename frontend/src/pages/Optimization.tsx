@@ -501,7 +501,7 @@ export function Optimization() {
                 3. Resultats de l'optimisation
               </CardTitle>
               <CardDescription>
-                {result.message} (temps: {result.solver_time_ms.toFixed(0)}ms)
+                {result.message} (temps: {Number(result.solver_time_ms).toFixed(0)}ms)
               </CardDescription>
             </CardHeader>
             <CardContent>

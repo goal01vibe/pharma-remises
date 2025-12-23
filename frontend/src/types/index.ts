@@ -72,6 +72,7 @@ export interface CatalogueProduit {
   conditionnement: number | null
   type_generique: 'princeps' | 'generique' | 'complementaire' | null
   prix_fabricant: number | null
+  prix_source: 'catalogue' | 'bdpm' | 'bdm_it' | null  // Origine du prix fabricant
   // Relations
   presentation?: Presentation
   laboratoire?: Laboratoire

@@ -20,9 +20,194 @@ from app.db.database import get_db
 from app.models import BdpmEquivalence, MesVentes, MatchingMemory, BdpmFileStatus
 from app.services import bdpm_downloader, matching_memory
 from app.services.intelligent_matching import MoleculeExtractor
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, process
+import re
 
 router = APIRouter(prefix="/repertoire", tags=["repertoire"])
+
+
+# =============================================================================
+# UTILS FUZZY MATCHING
+# =============================================================================
+
+def normalize_libelle(text: str) -> str:
+    """Normalise un libelle pour comparaison fuzzy."""
+    if not text:
+        return ""
+    # Minuscules
+    text = text.lower()
+    # Garder seulement alphanumeriques et espaces
+    text = re.sub(r'[^a-z0-9\s]', ' ', text)
+    # Normaliser espaces
+    text = ' '.join(text.split())
+    return text
+
+
+def extract_molecule_dosage(designation: str) -> tuple:
+    """Extrait molecule et dosage depuis une designation."""
+    if not designation:
+        return "", ""
+
+    text = designation.upper()
+
+    # Pattern pour dosage: nombre suivi de mg, g, ml, etc.
+    dosage_match = re.search(r'(\d+[\d,\.]*)\s*(MG|G|ML|%|MCG|UI)', text)
+    dosage = f"{dosage_match.group(1)}{dosage_match.group(2)}" if dosage_match else ""
+
+    # Molecule = premier mot significatif (avant le dosage ou le labo)
+    # Nettoyer le texte
+    molecule = text.split()[0] if text.split() else ""
+
+    # Si c'est un nom compose (ex: FLUTI/SALMETEROL), garder entier
+    if '/' in text.split()[0] if text.split() else False:
+        molecule = text.split()[0]
+
+    return molecule, dosage
+
+
+def extract_molecule_candidates(text: str) -> list:
+    """
+    Extrait les candidats molecules d'une designation (premiers mots alphabetiques).
+
+    Exemples:
+    - "AMLODIPINE 5MG BGR" → ["AMLODIPINE"]
+    - "FLUTI/SALMETEROL 250/25 ZTV" → ["FLUTI", "SALMETEROL"]
+    - "BIMATOPROST 0,1MG/ML BGR" → ["BIMATOPROST"]
+
+    Retourne une liste (pas un set) pour garder l'ordre.
+    """
+    if not text:
+        return []
+
+    # Normaliser: majuscules, remplacer "/" par espace
+    text = text.upper().replace('/', ' ')
+
+    # Liste minimale de mots a ignorer (labos courants)
+    ignore_labos = {
+        'BGR', 'BIOGARAN', 'VIATRIS', 'MYLAN', 'TEVA', 'SANDOZ', 'EG', 'ARROW',
+        'ZENTIVA', 'CRISTERS', 'ACCORD', 'ZYDUS', 'ZTV', 'LP',
+    }
+
+    molecules = []
+    words = text.split()
+
+    for word in words:
+        # Ignorer les labos
+        if word in ignore_labos:
+            continue
+        # Ignorer les chiffres et dosages
+        if re.match(r'^[\d,\.]+', word):
+            continue
+        # Ignorer les mots trop courts
+        if len(word) < 4:
+            continue
+        # Garder uniquement les mots alphabetiques
+        if re.match(r'^[A-Z]+$', word):
+            molecules.append(word)
+            # Limiter a 3 molecules max (les premiers mots)
+            if len(molecules) >= 3:
+                break
+
+    return molecules
+
+
+def libelle_contains_molecules(libelle: str, molecules: list, threshold: int = 80) -> bool:
+    """
+    Verifie si un libelle BDPM contient TOUTES les molecules (avec fuzzy matching).
+
+    Gere les abbreviations: "FLUTI" sera trouve dans "FLUTICASONE".
+    """
+    if not libelle or not molecules:
+        return False
+
+    libelle_upper = libelle.upper()
+
+    for mol in molecules:
+        # Essayer d'abord une recherche exacte (substring)
+        if mol in libelle_upper:
+            continue
+
+        # Sinon, chercher avec fuzzy partial matching
+        # Extraire les mots du libelle et chercher un match
+        libelle_words = re.findall(r'[A-Z]{4,}', libelle_upper)
+        found = False
+        for lw in libelle_words:
+            if fuzz.partial_ratio(mol, lw) >= threshold:
+                found = True
+                break
+
+        if not found:
+            return False
+
+    return True
+
+
+def count_molecule_matches(libelle: str, molecules: list) -> int:
+    """
+    Compte combien de molecules sont presentes dans le libelle.
+    Utilise pour filtrer les groupes avec trop de molecules supplementaires.
+    """
+    if not libelle:
+        return 0
+
+    libelle_upper = libelle.upper()
+    count = 0
+    for mol in molecules:
+        if mol in libelle_upper:
+            count += 1
+        else:
+            # Fuzzy check
+            libelle_words = re.findall(r'[A-Z]{4,}', libelle_upper)
+            for lw in libelle_words:
+                if fuzz.partial_ratio(mol, lw) >= 80:
+                    count += 1
+                    break
+    return count
+
+
+def find_fuzzy_match(designation: str, bdpm_by_libelle: dict, threshold: int = 70) -> Optional[tuple]:
+    """
+    Trouve un match fuzzy intelligent dans le repertoire BDPM.
+
+    Strategie:
+    1. Extraire les molecules candidates de la designation
+    2. Chercher les groupes BDPM qui contiennent TOUTES ces molecules
+    3. Parmi les candidats, scorer sur le libelle complet
+
+    Cela permet de matcher "FLUTI/SALMETEROL" avec "FLUTICASONE + SALMETEROL".
+    """
+    if not designation or not bdpm_by_libelle:
+        return None
+
+    # Extraire les molecules candidates
+    molecules = extract_molecule_candidates(designation)
+
+    # Si on a trouve des molecules, chercher les groupes qui les contiennent
+    candidats = {}
+    if molecules:
+        for key, bdpm in bdpm_by_libelle.items():
+            libelle = bdpm.libelle_groupe or ""
+            if libelle_contains_molecules(libelle, molecules):
+                candidats[key] = bdpm
+
+    # Si pas de candidats avec recherche par molecules, fallback sur tous
+    if not candidats:
+        candidats = bdpm_by_libelle
+
+    # Scorer sur le libelle complet parmi les candidats
+    normalized = normalize_libelle(designation)
+    result = process.extractOne(
+        normalized,
+        list(candidats.keys()),
+        scorer=fuzz.token_set_ratio,
+        score_cutoff=threshold
+    )
+
+    if result:
+        matched_key, score, _ = result
+        return candidats[matched_key], score
+
+    return None
 
 
 # =============================================================================
@@ -39,6 +224,7 @@ class RepertoireItem(BaseModel):
     denomination: Optional[str]  # Nom complet du medicament
     princeps_denomination: Optional[str]  # Nom du princeps du groupe
     absent_bdpm: bool = False
+    match_origin: Optional[str] = None  # 'bdpm', 'fuzzy'
 
     class Config:
         from_attributes = True
@@ -72,22 +258,61 @@ class RapprochementResultItem(BaseModel):
     designation: str
     quantite: int
     montant_ht: float
-    status: str  # 'valide', 'a_supprimer'
+    status: str  # 'valide', 'a_supprimer', 'a_rattacher'
     pfht: Optional[float] = None  # Prix fabricant HT
     raison_suppression: Optional[str] = None  # 'princeps', 'cip_non_trouve', 'sans_prix'
     groupe_generique_id: Optional[int] = None
     type_generique: Optional[int] = None  # 0=princeps, 1=generique
+    match_origin: Optional[str] = None  # 'exact', 'fuzzy', None
+
+
+class GroupeMembre(BaseModel):
+    """Un membre d'un groupe generique."""
+    cip13: str
+    denomination: Optional[str]
+    type_generique: Optional[int]  # 0=princeps, 1=generique
+    pfht: Optional[float]
+
+
+class PropositionRattachement(BaseModel):
+    """Proposition de rattachement fuzzy pour validation utilisateur."""
+    vente_id: int
+    cip13: Optional[str]
+    designation: str
+    quantite: int
+    montant_ht: float
+    # Groupe propose
+    groupe_generique_id: int
+    libelle_groupe: str
+    fuzzy_score: float
+    # Tous les membres du groupe
+    membres_groupe: List[GroupeMembre]
+    # Prix propose (du groupe)
+    pfht_propose: Optional[float] = None
 
 
 class RapprochementResult(BaseModel):
     valides: List[RapprochementResultItem]  # Generiques avec prix
     a_supprimer: List[RapprochementResultItem]  # Princeps, non trouves, sans prix
+    propositions_rattachement: List[PropositionRattachement]  # Fuzzy matches a valider
     stats: dict
 
 
 class ValidationRequest(BaseModel):
     vente_ids: List[int]
     action: str  # 'validate_match', 'delete'
+
+
+class RattachementItem(BaseModel):
+    """Item de rattachement a valider."""
+    vente_id: int
+    cip13: str
+    groupe_generique_id: int
+
+
+class RattachementRequest(BaseModel):
+    """Request pour valider des rattachements fuzzy."""
+    rattachements: List[RattachementItem]
 
 
 class MemoryStats(BaseModel):
@@ -364,70 +589,182 @@ def rapprocher_ventes(
 
     ventes = query.all()
 
-    # Index BDPM par CIP13 pour lookup rapide
+    # Index BDPM par CIP13 pour lookup rapide (inclut tous les CIP)
     bdpm_by_cip = {}
-    for r in db.query(BdpmEquivalence).filter(
-        BdpmEquivalence.absent_bdpm == False
-    ).all():
+    bdpm_all = db.query(BdpmEquivalence).all()
+    for r in bdpm_all:
         bdpm_by_cip[r.cip13] = r
+
+    # Index par libelle_groupe normalise pour fuzzy matching (seulement ceux avec groupe)
+    bdpm_by_libelle = {}
+    for r in bdpm_all:
+        if r.libelle_groupe and r.groupe_generique_id:
+            key = normalize_libelle(r.libelle_groupe)
+            if key not in bdpm_by_libelle:
+                bdpm_by_libelle[key] = r
+
+    # Index par groupe_generique_id pour recuperer tous les membres
+    bdpm_by_groupe = {}
+    for r in bdpm_all:
+        if r.groupe_generique_id:
+            if r.groupe_generique_id not in bdpm_by_groupe:
+                bdpm_by_groupe[r.groupe_generique_id] = []
+            bdpm_by_groupe[r.groupe_generique_id].append(r)
 
     valides = []
     a_supprimer = []
+    propositions_rattachement = []
 
-    for vente in ventes:
-        cip13 = vente.code_cip_achete.zfill(13) if vente.code_cip_achete else None
+    def creer_proposition(vente, cip13, fuzzy_bdpm, score):
+        """Cree une proposition de rattachement avec tous les membres du groupe."""
+        groupe_id = fuzzy_bdpm.groupe_generique_id
+        membres = bdpm_by_groupe.get(groupe_id, [])
 
-        item = RapprochementResultItem(
+        # Trouver le prix du groupe (premier generique avec prix)
+        pfht_groupe = None
+        for m in membres:
+            if m.pfht and m.type_generique == 1:
+                pfht_groupe = float(m.pfht)
+                break
+        if not pfht_groupe:
+            pfht_groupe = float(fuzzy_bdpm.pfht) if fuzzy_bdpm.pfht else None
+
+        return PropositionRattachement(
             vente_id=vente.id,
             cip13=cip13,
             designation=vente.designation or "",
             quantite=vente.quantite_annuelle or 0,
             montant_ht=float(vente.montant_annuel or 0),
-            status="a_supprimer",
+            groupe_generique_id=groupe_id,
+            libelle_groupe=fuzzy_bdpm.libelle_groupe or "",
+            fuzzy_score=score,
+            membres_groupe=[
+                GroupeMembre(
+                    cip13=m.cip13,
+                    denomination=m.denomination,
+                    type_generique=m.type_generique,
+                    pfht=float(m.pfht) if m.pfht else None
+                )
+                for m in membres
+            ],
+            pfht_propose=pfht_groupe
         )
 
-        # Pas de CIP -> a supprimer
+    for vente in ventes:
+        cip13 = vente.code_cip_achete.zfill(13) if vente.code_cip_achete else None
+
+        # Pas de CIP -> essayer fuzzy matching
         if not cip13:
-            item.raison_suppression = "cip_non_trouve"
-            a_supprimer.append(item)
+            fuzzy_result = find_fuzzy_match(vente.designation, bdpm_by_libelle, threshold=70)
+            if fuzzy_result:
+                fuzzy_bdpm, score = fuzzy_result
+                propositions_rattachement.append(creer_proposition(vente, cip13, fuzzy_bdpm, score))
+            else:
+                a_supprimer.append(RapprochementResultItem(
+                    vente_id=vente.id,
+                    cip13=cip13,
+                    designation=vente.designation or "",
+                    quantite=vente.quantite_annuelle or 0,
+                    montant_ht=float(vente.montant_annuel or 0),
+                    status="a_supprimer",
+                    raison_suppression="cip_non_trouve"
+                ))
             continue
 
-        # Chercher dans BDPM
+        # Chercher dans BDPM par CIP exact
         bdpm = bdpm_by_cip.get(cip13)
 
         if not bdpm:
-            # CIP non trouve dans BDPM
-            item.raison_suppression = "cip_non_trouve"
-            a_supprimer.append(item)
+            # CIP non trouve -> essayer fuzzy matching
+            fuzzy_result = find_fuzzy_match(vente.designation, bdpm_by_libelle, threshold=70)
+            if fuzzy_result:
+                fuzzy_bdpm, score = fuzzy_result
+                propositions_rattachement.append(creer_proposition(vente, cip13, fuzzy_bdpm, score))
+            else:
+                a_supprimer.append(RapprochementResultItem(
+                    vente_id=vente.id,
+                    cip13=cip13,
+                    designation=vente.designation or "",
+                    quantite=vente.quantite_annuelle or 0,
+                    montant_ht=float(vente.montant_annuel or 0),
+                    status="a_supprimer",
+                    raison_suppression="cip_non_trouve"
+                ))
             continue
 
-        item.groupe_generique_id = bdpm.groupe_generique_id
-        item.type_generique = bdpm.type_generique
+        # CIP trouve mais sans groupe -> essayer fuzzy pour proposer rattachement
+        if not bdpm.groupe_generique_id:
+            fuzzy_result = find_fuzzy_match(vente.designation, bdpm_by_libelle, threshold=70)
+            if fuzzy_result:
+                fuzzy_bdpm, score = fuzzy_result
+                propositions_rattachement.append(creer_proposition(vente, cip13, fuzzy_bdpm, score))
+            else:
+                # Pas de groupe et pas de fuzzy match -> a supprimer
+                a_supprimer.append(RapprochementResultItem(
+                    vente_id=vente.id,
+                    cip13=cip13,
+                    designation=vente.designation or "",
+                    quantite=vente.quantite_annuelle or 0,
+                    montant_ht=float(vente.montant_annuel or 0),
+                    status="a_supprimer",
+                    raison_suppression="cip_non_trouve",
+                    pfht=float(bdpm.pfht) if bdpm.pfht else None
+                ))
+            continue
 
-        # Princeps -> a supprimer
+        # Princeps (type_generique == 0) -> a supprimer
         if bdpm.type_generique == 0:
-            item.raison_suppression = "princeps"
-            a_supprimer.append(item)
+            a_supprimer.append(RapprochementResultItem(
+                vente_id=vente.id,
+                cip13=cip13,
+                designation=vente.designation or "",
+                quantite=vente.quantite_annuelle or 0,
+                montant_ht=float(vente.montant_annuel or 0),
+                status="a_supprimer",
+                raison_suppression="princeps",
+                groupe_generique_id=bdpm.groupe_generique_id,
+                type_generique=bdpm.type_generique
+            ))
             continue
 
         # Sans prix -> a supprimer
         if not bdpm.pfht:
-            item.raison_suppression = "sans_prix"
-            a_supprimer.append(item)
+            a_supprimer.append(RapprochementResultItem(
+                vente_id=vente.id,
+                cip13=cip13,
+                designation=vente.designation or "",
+                quantite=vente.quantite_annuelle or 0,
+                montant_ht=float(vente.montant_annuel or 0),
+                status="a_supprimer",
+                raison_suppression="sans_prix",
+                groupe_generique_id=bdpm.groupe_generique_id,
+                type_generique=bdpm.type_generique
+            ))
             continue
 
-        # Generique avec prix -> valide!
-        item.status = "valide"
-        item.pfht = float(bdpm.pfht)
-        valides.append(item)
+        # CIP avec groupe + prix -> valide!
+        valides.append(RapprochementResultItem(
+            vente_id=vente.id,
+            cip13=cip13,
+            designation=vente.designation or "",
+            quantite=vente.quantite_annuelle or 0,
+            montant_ht=float(vente.montant_annuel or 0),
+            status="valide",
+            pfht=float(bdpm.pfht),
+            groupe_generique_id=bdpm.groupe_generique_id,
+            type_generique=bdpm.type_generique,
+            match_origin="exact"
+        ))
 
     return RapprochementResult(
         valides=valides,
         a_supprimer=a_supprimer,
+        propositions_rattachement=propositions_rattachement,
         stats={
             "total_ventes": len(ventes),
             "valides": len(valides),
             "a_supprimer": len(a_supprimer),
+            "propositions": len(propositions_rattachement),
             "princeps": sum(1 for i in a_supprimer if i.raison_suppression == "princeps"),
             "cip_non_trouve": sum(1 for i in a_supprimer if i.raison_suppression == "cip_non_trouve"),
             "sans_prix": sum(1 for i in a_supprimer if i.raison_suppression == "sans_prix"),
@@ -469,6 +806,82 @@ def valider_rapprochement(
 
     else:
         raise HTTPException(status_code=400, detail=f"Action inconnue: {request.action}")
+
+
+@router.post("/rapprochement/rattacher")
+def rattacher_fuzzy(
+    request: RattachementRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Valide des rattachements fuzzy proposes par le systeme.
+
+    Pour chaque rattachement:
+    - Met a jour le groupe_generique_id du CIP dans bdpm_equivalences
+    - Met a jour le libelle_groupe
+    - Set type_generique = 1 (generique)
+    - Set match_origin = 'fuzzy' pour tracer l'origine du match
+
+    Le badge 'Fuzzy' sera affiche partout ou ce CIP apparait.
+    """
+    rattaches = 0
+    erreurs = []
+
+    for item in request.rattachements:
+        cip13 = item.cip13.zfill(13) if item.cip13 else None
+        if not cip13:
+            erreurs.append({"vente_id": item.vente_id, "erreur": "CIP manquant"})
+            continue
+
+        # Recuperer les infos du groupe propose
+        groupe_ref = db.query(BdpmEquivalence).filter(
+            BdpmEquivalence.groupe_generique_id == item.groupe_generique_id
+        ).first()
+
+        if not groupe_ref:
+            erreurs.append({"vente_id": item.vente_id, "erreur": f"Groupe {item.groupe_generique_id} non trouve"})
+            continue
+
+        # Chercher le CIP dans bdpm_equivalences
+        bdpm = db.query(BdpmEquivalence).filter(BdpmEquivalence.cip13 == cip13).first()
+
+        if bdpm:
+            # Mettre a jour le CIP existant
+            bdpm.groupe_generique_id = item.groupe_generique_id
+            bdpm.libelle_groupe = groupe_ref.libelle_groupe
+            bdpm.type_generique = 1  # Generique
+            bdpm.match_origin = 'fuzzy'
+            # Copier le pfht du groupe si le CIP n'en a pas
+            if not bdpm.pfht and groupe_ref.pfht:
+                bdpm.pfht = groupe_ref.pfht
+        else:
+            # Le CIP n'existe pas dans bdpm_equivalences, on doit le creer
+            # Recuperer la designation depuis la vente
+            vente = db.query(MesVentes).filter(MesVentes.id == item.vente_id).first()
+            denomination = vente.designation if vente else None
+
+            new_bdpm = BdpmEquivalence(
+                cip13=cip13,
+                groupe_generique_id=item.groupe_generique_id,
+                libelle_groupe=groupe_ref.libelle_groupe,
+                type_generique=1,  # Generique
+                pfht=groupe_ref.pfht,
+                denomination=denomination,
+                princeps_denomination=groupe_ref.princeps_denomination,
+                absent_bdpm=False,
+                match_origin='fuzzy'
+            )
+            db.add(new_bdpm)
+
+        rattaches += 1
+
+    db.commit()
+
+    return {
+        "rattaches": rattaches,
+        "erreurs": erreurs,
+        "message": f"{rattaches} CIP(s) rattache(s) avec succes"
+    }
 
 
 # =============================================================================

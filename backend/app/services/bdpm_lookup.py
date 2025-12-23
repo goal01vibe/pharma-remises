@@ -210,6 +210,7 @@ def enrich_catalogue_with_bdpm(db: Session, laboratoire_id: int) -> dict:
 
                 if prix_bdpm is not None:
                     produit.prix_fabricant = prix_bdpm
+                    produit.prix_source = 'bdpm'  # Marquer l'origine du prix
                     stats["enriched"] += 1
 
                     # Mettre a jour groupe si non defini

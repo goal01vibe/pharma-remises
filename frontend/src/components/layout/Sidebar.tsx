@@ -10,6 +10,7 @@ import {
   FileSpreadsheet,
   Sparkles,
   Target,
+  Database,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -18,6 +19,7 @@ const navigation = [
   { name: 'Laboratoires', href: '/laboratoires', icon: Building2 },
   { name: 'Catalogues', href: '/catalogues', icon: Package },
   { name: 'Mes Ventes', href: '/ventes', icon: ShoppingCart },
+  { name: 'Repertoire Generique', href: '/repertoire', icon: Database },
   { name: 'Simulations', href: '/simulations', icon: Calculator },
   { name: 'Simulations Scenarios', href: '/simulation-intelligente', icon: Sparkles },
   { name: 'Comparaison', href: '/comparaison', icon: GitCompare },

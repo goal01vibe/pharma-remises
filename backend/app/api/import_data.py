@@ -141,6 +141,8 @@ async def import_catalogue(
                         code_cip=code_cip if code_cip else None,
                         nom_commercial=designation if designation else None,
                         prix_ht=prix_ht if prix_ht else None,
+                        prix_fabricant=prix_ht if prix_ht else None,  # Copier prix catalogue
+                        prix_source='catalogue' if prix_ht else None,  # Marquer origine
                         remise_pct=remise_pct if remise_pct else None,
                         source='manuel',  # Marquer comme import manuel
                     )

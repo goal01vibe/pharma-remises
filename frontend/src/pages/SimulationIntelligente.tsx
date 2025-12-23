@@ -134,12 +134,13 @@ export function SimulationIntelligente() {
   }, [simulationResult?.details])
 
   // Handlers
-  const handleProcessMatching = () => {
+  const handleProcessMatching = (forceRematch = false) => {
     if (!selectedImportId || selectedLaboIds.length === 0) return
     processMatchingMutation.mutate({
       import_id: selectedImportId,
       min_score: 70,
       labo_ids: selectedLaboIds,
+      force_rematch: forceRematch,
     })
   }
 
@@ -416,7 +417,7 @@ export function SimulationIntelligente() {
 
                   <Button
                     variant="outline"
-                    onClick={handleProcessMatching}
+                    onClick={() => handleProcessMatching(true)}
                     disabled={processMatchingMutation.isPending}
                   >
                     <Loader2 className={`mr-2 h-4 w-4 ${processMatchingMutation.isPending ? 'animate-spin' : 'hidden'}`} />
@@ -429,7 +430,7 @@ export function SimulationIntelligente() {
                     Le matching n'a pas encore ete effectue pour cet import.
                   </p>
                   <Button
-                    onClick={handleProcessMatching}
+                    onClick={() => handleProcessMatching(false)}
                     disabled={!selectedImportId || processMatchingMutation.isPending}
                     size="lg"
                   >
@@ -635,7 +636,7 @@ export function SimulationIntelligente() {
                                           ? 'text-red-600'
                                           : 'text-green-600'
                                       }`}
-                                      title={`Ecart: ${Number(line.price_diff) > 0 ? '+' : ''}${formatEuro(Number(line.price_diff))} (${line.price_diff_pct?.toFixed(1)}%)`}
+                                      title={`Ecart: ${Number(line.price_diff) > 0 ? '+' : ''}${formatEuro(Number(line.price_diff))} (${line.price_diff_pct != null ? Number(line.price_diff_pct).toFixed(1) : '?'}%)`}
                                     >
                                       {Number(line.price_diff) > 0 ? '▲' : '▼'}
                                     </span>
@@ -648,7 +649,7 @@ export function SimulationIntelligente() {
                             <TableCell>
                               {line.disponible ? (
                                 <Badge variant="default" className="text-xs">
-                                  {line.match_type} ({line.match_score?.toFixed(0)}%)
+                                  {line.match_type} ({line.match_score != null ? Number(line.match_score).toFixed(0) : '?'}%)
                                 </Badge>
                               ) : (
                                 <Badge variant="destructive" className="text-xs">
