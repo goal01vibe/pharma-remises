@@ -3,6 +3,7 @@ REM Lance Claude Code dans un environnement Docker isole
 REM Usage: claude-sandbox.bat [options]
 REM   Sans argument: lance Claude interactif
 REM   --build: reconstruit l'image avant de lancer
+REM   --no-cache: reconstruit l'image sans cache
 
 setlocal
 
@@ -15,6 +16,19 @@ if errorlevel 1 (
     echo [ERREUR] Docker n'est pas lance. Demarre Docker Desktop d'abord.
     pause
     exit /b 1
+)
+
+REM Option --no-cache pour reconstruire sans cache
+if "%1"=="--no-cache" (
+    echo [INFO] Construction de l'image Docker sans cache...
+    docker build --no-cache -t %IMAGE_NAME% .
+    if errorlevel 1 (
+        echo [ERREUR] Echec de la construction de l'image.
+        pause
+        exit /b 1
+    )
+    echo [OK] Image construite avec succes.
+    shift
 )
 
 REM Option --build pour reconstruire l'image
@@ -60,7 +74,7 @@ REM   --network host: acces au PostgreSQL local (port 5433)
 docker run -it --rm ^
     --name %CONTAINER_NAME% ^
     -v "%CD%":/workspace ^
-    -v %USERPROFILE%\.claude:/root/.claude ^
+    -v %USERPROFILE%\.claude:/home/claude/.claude ^
     --network host ^
     -e ANTHROPIC_API_KEY=%ANTHROPIC_API_KEY% ^
     %IMAGE_NAME% ^
