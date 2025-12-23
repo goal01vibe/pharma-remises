@@ -1,8 +1,12 @@
 """Pytest configuration and fixtures for tests."""
 import os
+import sys
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
+
+# Add backend to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Use test database
 DATABASE_URL_TEST = os.getenv(
@@ -19,10 +23,14 @@ def engine():
 
 @pytest.fixture(scope="function")
 def db(engine) -> Session:
-    """Create a new database session for each test."""
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    """Create a new database session for each test with transaction rollback."""
+    connection = engine.connect()
+    transaction = connection.begin()
+    SessionLocal = sessionmaker(bind=connection)
     session = SessionLocal()
-    try:
-        yield session
-    finally:
-        session.close()
+
+    yield session
+
+    session.close()
+    transaction.rollback()
+    connection.close()
