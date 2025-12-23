@@ -22,6 +22,9 @@ from app.api import (
     optimization_router,
     repertoire_router,
 )
+from app.api.groupe import router as groupe_router
+from app.api.validations import router as validations_router
+from app.api.prix import router as prix_router
 
 
 @asynccontextmanager
@@ -63,6 +66,9 @@ app.include_router(coverage_router)
 app.include_router(reports_router)
 app.include_router(optimization_router)
 app.include_router(repertoire_router)
+app.include_router(groupe_router)
+app.include_router(validations_router)
+app.include_router(prix_router)
 
 
 @app.get("/")
