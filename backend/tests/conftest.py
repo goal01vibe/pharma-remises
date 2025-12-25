@@ -8,10 +8,10 @@ from sqlalchemy.orm import sessionmaker, Session
 # Add backend to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Use test database
+# Use real database with transaction rollback (safe - no data modification)
 DATABASE_URL_TEST = os.getenv(
     "DATABASE_URL_TEST",
-    "postgresql://postgres:postgres@localhost:5433/pharma_remises_test"
+    "postgresql://postgres:postgres@localhost:5433/pharma_remises"
 )
 
 

@@ -15,6 +15,8 @@ import {
   Link,
   ChevronDown,
   ChevronUp,
+  AlertTriangle,
+  X,
 } from 'lucide-react'
 
 import { Header } from '@/components/layout/Header'
@@ -48,8 +50,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { repertoireApi, ventesApi, type RattachementItem } from '@/lib/api'
+import { repertoireApi, ventesApi, type RattachementItem, type RattachementAlerte } from '@/lib/api'
 import { toast } from 'sonner'
+import { GroupeDrawer } from '@/components/GroupeDrawer'
 
 export default function RapprochementVentes() {
   const navigate = useNavigate()
@@ -68,6 +71,13 @@ export default function RapprochementVentes() {
 
   // Dialog confirmation suppression
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+
+  // Drawer groupe generique
+  const [selectedGroupe, setSelectedGroupe] = useState<number | null>(null)
+  const [selectedCip, setSelectedCip] = useState<string>()
+
+  // Alertes conditionnement
+  const [alertesConditionnement, setAlertesConditionnement] = useState<RattachementAlerte[]>([])
 
   // Imports disponibles
   const { data: imports } = useQuery({
@@ -129,7 +139,15 @@ export default function RapprochementVentes() {
     mutationFn: (rattachements: RattachementItem[]) => repertoireApi.rattacherFuzzy(rattachements),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['repertoire'] })
-      toast.success(data.message)
+
+      // Gerer les alertes conditionnement
+      if (data.alertes && data.alertes.length > 0) {
+        setAlertesConditionnement(data.alertes)
+        toast.warning(`${data.rattaches} rattache(s) - ${data.alertes.length} alerte(s) conditionnement`)
+      } else {
+        toast.success(data.message)
+      }
+
       setSelectedToRattach(new Set())
       // Re-run rapprochement to update stats
       rapprochementMutation.mutate()
@@ -330,6 +348,53 @@ export default function RapprochementVentes() {
               </CardHeader>
             </Card>
           </div>
+
+          {/* Alertes conditionnement */}
+          {alertesConditionnement.length > 0 && (
+            <Card className="border-orange-300 bg-orange-50">
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-orange-700 flex items-center gap-2">
+                    <AlertTriangle className="h-5 w-5" />
+                    Alertes Conditionnement ({alertesConditionnement.length})
+                  </CardTitle>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setAlertesConditionnement([])}
+                    className="gap-1 text-orange-600 hover:text-orange-800"
+                  >
+                    <X className="h-4 w-4" />
+                    Fermer
+                  </Button>
+                </div>
+                <CardDescription className="text-orange-600">
+                  Ces CIP ont ete rattaches mais le conditionnement ne correspond pas - pas de prix attribue.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  {alertesConditionnement.map((alerte, idx) => (
+                    <div key={idx} className="flex items-start gap-3 p-2 bg-white rounded border border-orange-200">
+                      <AlertTriangle className="h-4 w-4 text-orange-500 mt-0.5 flex-shrink-0" />
+                      <div className="flex-1 text-sm">
+                        <div className="font-medium">CIP: {alerte.cip13}</div>
+                        <div className="text-muted-foreground">{alerte.message}</div>
+                        {alerte.conditionnement_cip && (
+                          <div className="text-xs mt-1">
+                            <span className="text-orange-600">Conditionnement CIP: {alerte.conditionnement_cip} u.</span>
+                            {alerte.conditionnements_groupe.length > 0 && (
+                              <span className="ml-2">| Disponibles: {alerte.conditionnements_groupe.join(', ')} u.</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           {/* Propositions de rattachement */}
           {result.propositions_rattachement && result.propositions_rattachement.length > 0 && (
@@ -590,7 +655,16 @@ export default function RapprochementVentes() {
                       {result.valides.slice(0, 100).map((item) => {
                         const montantLigne = item.pfht ? item.quantite * item.pfht : 0
                         return (
-                          <TableRow key={item.vente_id}>
+                          <TableRow
+                            key={item.vente_id}
+                            className={item.groupe_generique_id ? "cursor-pointer hover:bg-green-100" : ""}
+                            onClick={() => {
+                              if (item.groupe_generique_id) {
+                                setSelectedGroupe(item.groupe_generique_id)
+                                setSelectedCip(item.cip13 || undefined)
+                              }
+                            }}
+                          >
                             <TableCell className="font-mono text-xs">{item.cip13 || '-'}</TableCell>
                             <TableCell className="max-w-xs truncate" title={item.designation}>
                               {item.designation}
@@ -669,6 +743,14 @@ export default function RapprochementVentes() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Drawer details groupe */}
+      <GroupeDrawer
+        groupeId={selectedGroupe}
+        currentCip={selectedCip}
+        open={!!selectedGroupe}
+        onClose={() => setSelectedGroupe(null)}
+      />
       </div>
     </div>
   )

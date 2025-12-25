@@ -79,9 +79,9 @@ class AuditLogger:
                     description, old_values, new_values, metadata,
                     status, error_message
                 ) VALUES (
-                    :user_email, :ip_address::inet, :user_agent,
+                    :user_email, CAST(:ip_address AS inet), :user_agent,
                     :action, :resource_type, :resource_id,
-                    :description, :old_values::jsonb, :new_values::jsonb, :metadata::jsonb,
+                    :description, CAST(:old_values AS jsonb), CAST(:new_values AS jsonb), CAST(:metadata AS jsonb),
                     :status, :error_message
                 )
             """),

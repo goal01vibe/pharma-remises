@@ -44,6 +44,7 @@ import {
   intelligentMatchingApi,
   type MatchingDetailItem,
 } from '@/lib/api'
+import { GroupeDrawer } from '@/components/GroupeDrawer'
 
 type FilterMode = 'all' | 'matched' | 'unmatched'
 
@@ -137,6 +138,10 @@ export function MatchingDetails() {
   // Modal pour correction manuelle
   const [editingRow, setEditingRow] = useState<MatchingDetailItem | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
+
+  // Drawer groupe generique
+  const [selectedGroupe, setSelectedGroupe] = useState<number | null>(null)
+  const [selectedCip, setSelectedCip] = useState<string>()
 
   // Queries
   const { data: details, isLoading } = useQuery({
@@ -517,18 +522,27 @@ export function MatchingDetails() {
 
                 return (
                   <>
-                    {visibleRows.map((row) => (
-                      <TableRow
-                        key={row.id}
-                        className={row.original.matched ? '' : 'bg-red-50/50'}
-                      >
-                        {row.getVisibleCells().map((cell) => (
-                          <TableCell key={cell.id}>
-                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                          </TableCell>
-                        ))}
-                      </TableRow>
-                    ))}
+                    {visibleRows.map((row) => {
+                      const groupeId = (row.original as { groupe_generique_id?: number }).groupe_generique_id
+                      return (
+                        <TableRow
+                          key={row.id}
+                          className={`${row.original.matched ? '' : 'bg-red-50/50'} ${groupeId ? 'cursor-pointer hover:bg-muted/50' : ''}`}
+                          onClick={() => {
+                            if (groupeId) {
+                              setSelectedGroupe(groupeId)
+                              setSelectedCip(row.original.vente_code_cip || undefined)
+                            }
+                          }}
+                        >
+                          {row.getVisibleCells().map((cell) => (
+                            <TableCell key={cell.id}>
+                              {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                            </TableCell>
+                          ))}
+                        </TableRow>
+                      )
+                    })}
                     {hasMore && (
                       <TableRow>
                         <TableCell colSpan={columns.length} className="text-center py-4">
@@ -648,6 +662,14 @@ export function MatchingDetails() {
           )}
         </DialogContent>
       </Dialog>
+
+      {/* Drawer details groupe */}
+      <GroupeDrawer
+        groupeId={selectedGroupe}
+        currentCip={selectedCip}
+        open={!!selectedGroupe}
+        onClose={() => setSelectedGroupe(null)}
+      />
     </div>
   )
 }

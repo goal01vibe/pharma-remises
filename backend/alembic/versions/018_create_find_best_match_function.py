@@ -22,7 +22,7 @@ def upgrade() -> None:
             RETURN QUERY
             SELECT
                 b.cip13,
-                b.denomination,
+                b.denomination::TEXT,
                 similarity(b.denomination, search_term)::FLOAT AS score
             FROM bdpm_equivalences b
             WHERE

@@ -602,112 +602,23 @@ class IntelligentMatcher:
         if results:
             return sorted(results, key=lambda x: (-x.score, x.laboratoire_nom))
 
-        # 3. Extraire les composants de la designation pour fuzzy matching
-        query_components = self.extractor.extract_from_commercial_name(designation)
+        # =============================================================================
+        # FUZZY MATCHING DESACTIVE
+        # =============================================================================
+        # Le fuzzy matching sur molecules/noms commerciaux est DANGEREUX en pharmacie:
+        # - ALMOTRIPTAN != ZOLMITRIPTAN (triptans differents)
+        # - CLARITHROMYCINE != AZITHROMYCINE (antibiotiques differents)
+        # - METRONIDAZOLE != SPIRAMYCINE/METRONIDAZOLE (mono vs combo)
+        #
+        # Seuls les matchs fiables sont autorises:
+        # 1. CIP exact (code unique officiel)
+        # 2. Groupe generique BDPM (equivalence therapeutique officielle)
+        #
+        # Si aucun match CIP ou groupe, le produit est considere comme "no match"
+        # =============================================================================
 
-        # 4. Chercher par fuzzy matching sur molecule
-        products_by_groupe = self._get_products_by_groupe()
-        all_products = self.db.query(CatalogueProduit).filter(
-            CatalogueProduit.actif == True
-        ).all()
-
-        # Construire un index molecule -> produits pour le fuzzy matching
-        molecule_to_products = {}
-        for p in all_products:
-            if target_lab_id and p.laboratoire_id != target_lab_id:
-                continue
-
-            if p.libelle_groupe:
-                target_comp = self.extractor.extract_from_libelle_groupe(p.libelle_groupe)
-            else:
-                target_comp = self.extractor.extract_from_commercial_name(p.nom_commercial or "")
-
-            if target_comp.molecule:
-                mol_key = target_comp.molecule.upper()
-                if mol_key not in molecule_to_products:
-                    molecule_to_products[mol_key] = []
-                molecule_to_products[mol_key].append((p, target_comp))
-
-        # Fuzzy match sur les molecules
-        if query_components.molecule and molecule_to_products:
-            molecule_choices = list(molecule_to_products.keys())
-            fuzzy_matches = self.fuzzy.match_molecule(
-                query_components.molecule,
-                molecule_choices,
-                limit=10
-            )
-
-            seen_products = set()  # Eviter les doublons
-
-            for matched_mol, mol_score, _ in fuzzy_matches:
-                for p, target_comp in molecule_to_products.get(matched_mol, []):
-                    if p.id in seen_products:
-                        continue
-                    seen_products.add(p.id)
-
-                    # Calculer score composite
-                    component_score = self.fuzzy.calculate_component_score(
-                        query_components, target_comp
-                    )
-
-                    # Determiner le type de match et ajuster le score
-                    if p.groupe_generique_id and mol_score >= 95:
-                        match_type = 'groupe_generique'
-                        final_score = min(100.0, component_score * 1.05)  # Bonus groupe
-                    else:
-                        match_type = 'fuzzy_molecule'
-                        final_score = component_score * 0.85  # Cap a 85%
-
-                    if final_score >= 60:  # Seuil minimum
-                        results.append(MatchResult(
-                            produit_id=p.id,
-                            laboratoire_id=p.laboratoire_id,
-                            laboratoire_nom=labs_map.get(p.laboratoire_id, "?"),
-                            code_cip=p.code_cip or "",
-                            nom_commercial=p.nom_commercial or "",
-                            groupe_generique_id=p.groupe_generique_id,
-                            score=round(final_score, 2),
-                            match_type=match_type,
-                            prix_fabricant=p.prix_fabricant,
-                            remise_pct=p.remise_pct
-                        ))
-
-        # 4. Fallback: fuzzy sur nom commercial complet
-        if not results:
-            all_products_filtered = [
-                p for p in all_products
-                if (not target_lab_id or p.laboratoire_id == target_lab_id)
-                and p.nom_commercial
-            ]
-
-            if all_products_filtered:
-                product_names = [p.nom_commercial for p in all_products_filtered]
-                fuzzy_matches = self.fuzzy.match_commercial_name(
-                    designation,
-                    product_names,
-                    limit=5
-                )
-
-                for matched_name, name_score, idx in fuzzy_matches:
-                    p = all_products_filtered[idx]
-                    final_score = name_score * 0.70  # Cap a 70%
-
-                    if final_score >= 50:  # Seuil plus bas pour fallback
-                        results.append(MatchResult(
-                            produit_id=p.id,
-                            laboratoire_id=p.laboratoire_id,
-                            laboratoire_nom=labs_map.get(p.laboratoire_id, "?"),
-                            code_cip=p.code_cip or "",
-                            nom_commercial=p.nom_commercial or "",
-                            groupe_generique_id=p.groupe_generique_id,
-                            score=round(final_score, 2),
-                            match_type='fuzzy_commercial',
-                            prix_fabricant=p.prix_fabricant,
-                            remise_pct=p.remise_pct
-                        ))
-
-        # Trier par score decroissant, puis par nom de labo
-        return sorted(results, key=lambda x: (-x.score, x.laboratoire_nom))
+        # Pas de match trouve - retourner liste vide
+        return []
 
     def match_ventes_to_catalogues(
         self,

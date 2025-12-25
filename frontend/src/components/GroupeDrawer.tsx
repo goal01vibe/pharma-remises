@@ -12,12 +12,14 @@ interface GroupeEquivalent {
   denomination: string
   labo?: string
   pfht?: number
+  conditionnement?: number
 }
 
 interface GroupePrinceps {
   cip13: string
   denomination: string
   pfht?: number
+  conditionnement?: number
 }
 
 interface GroupeStats {
@@ -92,7 +94,14 @@ export function GroupeDrawer({ groupeId, currentCip, open, onClose }: GroupeDraw
                   Princeps Referent
                 </h3>
                 <div className="p-3 bg-blue-50 rounded-lg border border-blue-200">
-                  <p className="font-bold">{data.princeps.denomination}</p>
+                  <p className="font-bold">
+                    {data.princeps.denomination}
+                    {data.princeps.conditionnement && (
+                      <span className="ml-2 text-sm font-normal text-blue-600">
+                        ({data.princeps.conditionnement} u.)
+                      </span>
+                    )}
+                  </p>
                   <div className="flex items-center justify-between text-sm text-muted-foreground mt-1">
                     <span>CIP: {data.princeps.cip13}</span>
                     <span>PFHT: {data.princeps.pfht?.toFixed(2)} EUR</span>
@@ -127,32 +136,50 @@ export function GroupeDrawer({ groupeId, currentCip, open, onClose }: GroupeDraw
               <h3 className="font-semibold mb-2">
                 Equivalents Generiques ({data.equivalents.length})
               </h3>
-              <div className="max-h-[400px] overflow-y-auto space-y-1">
+              <div className="space-y-1">
                 {data.equivalents.map((equiv) => (
                   <div
                     key={equiv.cip13}
-                    className={`p-2 rounded flex justify-between items-center ${
+                    className={`p-2 rounded ${
                       equiv.cip13 === currentCip
                         ? 'bg-green-100 border border-green-300'
                         : 'bg-gray-50 hover:bg-gray-100'
                     }`}
                   >
-                    <div className="flex-1">
-                      <p className="text-sm font-medium">{equiv.denomination}</p>
-                      <p className="text-xs text-muted-foreground">
-                        CIP: {equiv.cip13}
-                      </p>
+                    <div className="flex justify-between items-start">
+                      <div className="flex-1">
+                        <p className="text-sm font-medium">
+                          {equiv.denomination}
+                          {equiv.conditionnement && (
+                            <span className="ml-1 text-xs text-muted-foreground">
+                              ({equiv.conditionnement} u.)
+                            </span>
+                          )}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          CIP: {equiv.cip13}
+                        </p>
+                      </div>
+                      <div className="text-right flex items-center gap-2">
+                        {equiv.labo && (
+                          <Badge variant="outline" className="text-xs">
+                            {equiv.labo}
+                          </Badge>
+                        )}
+                        <span className="text-sm font-medium">
+                          {equiv.pfht?.toFixed(2)} EUR
+                        </span>
+                      </div>
                     </div>
-                    <div className="text-right flex items-center gap-2">
-                      {equiv.labo && (
-                        <Badge variant="outline" className="text-xs">
-                          {equiv.labo}
-                        </Badge>
-                      )}
-                      <span className="text-sm font-medium">
-                        {equiv.pfht?.toFixed(2)} EUR
-                      </span>
-                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="mt-1 h-6 text-xs"
+                      onClick={() => copyCip(equiv.cip13)}
+                    >
+                      <Copy className="h-3 w-3 mr-1" />
+                      Copier CIP
+                    </Button>
                   </div>
                 ))}
               </div>

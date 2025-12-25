@@ -5,6 +5,7 @@ import {
   Database,
   Search,
   RefreshCw,
+  RotateCcw,
   FileSpreadsheet,
   GitCompare,
   ChevronDown,
@@ -35,6 +36,7 @@ import {
 } from '@/components/ui/collapsible'
 import { repertoireApi } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { GroupeDrawer } from '@/components/GroupeDrawer'
 
 // Types for BDPM status
 interface BdpmFile {
@@ -65,6 +67,8 @@ export default function RepertoireGenerique() {
   const [page, setPage] = useState(0)
   const [sortBy, setSortBy] = useState<SortField>('denomination')
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
+  const [selectedGroupe, setSelectedGroupe] = useState<number | null>(null)
+  const [selectedCip, setSelectedCip] = useState<string>()
   const limit = 50
 
   // Stats du repertoire
@@ -94,12 +98,6 @@ export default function RepertoireGenerique() {
     queryFn: repertoireApi.getBdpmStatus,
   })
 
-  // Stats memoire matching
-  const { data: memoryStats } = useQuery({
-    queryKey: ['memory-stats'],
-    queryFn: repertoireApi.getMemoryStats,
-  })
-
   // Mutation check BDPM
   const checkBdpmMutation = useMutation({
     mutationFn: (force: boolean) => repertoireApi.checkBdpmUpdates(force),
@@ -107,7 +105,9 @@ export default function RepertoireGenerique() {
       queryClient.invalidateQueries({ queryKey: ['bdpm-status'] })
       queryClient.invalidateQueries({ queryKey: ['repertoire-stats'] })
       queryClient.invalidateQueries({ queryKey: ['repertoire-list'] })
-      if (data.files_updated > 0) {
+      if (data.force_reintegration) {
+        alert(`BDPM re-integre:\n- ${data.new_cips} nouveaux CIP\n- ${data.updated_cips || 0} mis a jour\n- ${data.removed_cips} marques absents`)
+      } else if (data.files_updated > 0) {
         alert(`BDPM mis a jour: ${data.new_cips} nouveaux CIP, ${data.removed_cips} absents`)
       } else {
         alert('BDPM deja a jour')
@@ -115,18 +115,6 @@ export default function RepertoireGenerique() {
     },
     onError: () => {
       alert('Erreur lors de la verification BDPM')
-    },
-  })
-
-  // Mutation peupler memoire
-  const populateMutation = useMutation({
-    mutationFn: repertoireApi.populateFromBdpm,
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['memory-stats'] })
-      alert(`Memoire peuplee: ${data.cips_added} CIP ajoutes, ${data.groupes_created} groupes crees`)
-    },
-    onError: () => {
-      alert('Erreur lors du peuplement de la memoire')
     },
   })
 
@@ -262,14 +250,6 @@ export default function RepertoireGenerique() {
               </CardTitle>
             </CardHeader>
           </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardDescription>Memoire</CardDescription>
-              <CardTitle className="text-2xl text-purple-600">
-                {memoryStats?.total_cips.toLocaleString() || '0'}
-              </CardTitle>
-            </CardHeader>
-          </Card>
         </div>
 
         {/* Actions */}
@@ -298,16 +278,21 @@ export default function RepertoireGenerique() {
 
           <Button
             variant="outline"
-            onClick={() => populateMutation.mutate()}
-            disabled={populateMutation.isPending}
+            onClick={() => {
+              if (confirm('Forcer la re-integration de tous les CIP depuis les fichiers BDPM existants ?')) {
+                checkBdpmMutation.mutate(true)
+              }
+            }}
+            disabled={checkBdpmMutation.isPending}
             className="gap-2"
+            title="Re-integre tous les CIP meme si les fichiers n'ont pas change"
           >
-            {populateMutation.isPending ? (
+            {checkBdpmMutation.isPending ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
-              <Database className="h-4 w-4" />
+              <RotateCcw className="h-4 w-4" />
             )}
-            Peupler memoire
+            Forcer sync
           </Button>
 
           <Button variant="outline" className="gap-2">
@@ -435,7 +420,16 @@ export default function RepertoireGenerique() {
                   </TableRow>
                 ) : (
                   items?.map((item) => (
-                    <TableRow key={item.cip13}>
+                    <TableRow
+                      key={item.cip13}
+                      className={item.groupe_generique_id ? "cursor-pointer hover:bg-muted/50" : ""}
+                      onClick={() => {
+                        if (item.groupe_generique_id) {
+                          setSelectedGroupe(item.groupe_generique_id)
+                          setSelectedCip(item.cip13)
+                        }
+                      }}
+                    >
                       <TableCell className="font-mono text-sm">{item.cip13}</TableCell>
                       <TableCell className="max-w-md">
                         <div className="truncate" title={item.denomination || item.libelle_groupe || ''}>
@@ -490,6 +484,14 @@ export default function RepertoireGenerique() {
           </div>
         </Card>
       </div>
+
+      {/* Drawer details groupe */}
+      <GroupeDrawer
+        groupeId={selectedGroupe}
+        currentCip={selectedCip}
+        open={!!selectedGroupe}
+        onClose={() => setSelectedGroupe(null)}
+      />
     </div>
   )
 }

@@ -22,20 +22,36 @@ logger = logging.getLogger(__name__)
 BDPM_PATH = Path(r"C:\pdf-extractor\data\bdpm\raw")
 
 # =============================================================================
-# PATTERNS DE NOMS POUR LES 5 LABOS GENERIQUES CIBLES
+# PATTERNS DE NOMS POUR LES 14 LABOS GENERIQUES CIBLES
 # Attribution basée sur le nom commercial du produit, PAS le titulaire AMM BDPM
 # Patterns découverts par analyse des catalogues BDPM
 # =============================================================================
 LAB_PATTERNS = {
-    'BIOGARAN': ['BIOGARAN', 'BGR'],  # ALMUS exclu (labo séparé)
+    # 5 labos initiaux
+    'BIOGARAN': ['BIOGARAN', 'BGR'],  # BGR = abréviation courante
     'SANDOZ': ['SANDOZ'],
     'ARROW': ['ARROW'],  # Inclut ARROW LAB, ARROW GENERIQUES automatiquement
     'ZENTIVA': ['ZENTIVA'],  # Inclut ZENTIVA LAB automatiquement
     'VIATRIS': ['VIATRIS', 'MYLAN'],  # VIATRIS a racheté MYLAN - inclut variantes
+    # 5 labos supplémentaires (phase 1)
+    'EG': ['EG LABO', 'EG '],  # Attention: EG avec espace pour éviter faux positifs
+    'TEVA': ['TEVA'],
+    'CRISTERS': ['CRISTERS'],
+    'ZYDUS': ['ZYDUS'],
+    'ACCORD': ['ACCORD'],  # Accord Healthcare
+    # 4 labos supplémentaires (phase 2 - analyse BDPM dec 2024)
+    'EVOLUGEN': ['EVOLUGEN'],  # EVOLUPHARM - 193 produits BDPM
+    'KRKA': ['KRKA'],          # Labo slovène - 114 produits BDPM
+    'ALMUS': ['ALMUS'],        # Labo séparé de BIOGARAN - 110 produits BDPM
+    'SUN': ['SUN PHARMA', 'SUN '],  # Sun Pharma - 87 produits BDPM
 }
 
 # Liste ordonnée pour la détection (évite conflits de patterns)
-TARGET_LABS = ['BIOGARAN', 'SANDOZ', 'ARROW', 'ZENTIVA', 'VIATRIS']
+TARGET_LABS = [
+    'BIOGARAN', 'SANDOZ', 'ARROW', 'ZENTIVA', 'VIATRIS',
+    'EG', 'TEVA', 'CRISTERS', 'ZYDUS', 'ACCORD',
+    'EVOLUGEN', 'KRKA', 'ALMUS', 'SUN'
+]
 
 
 def detect_lab_from_name(denomination: str) -> Optional[str]:
@@ -798,3 +814,149 @@ def import_target_labs(db: Session) -> ImportResult:
     logger.info("=" * 60)
 
     return result
+
+
+# =============================================================================
+# NOUVELLES FONCTIONS : Historique des prix et Princeps par groupe
+# =============================================================================
+
+def update_pfht_with_history(
+    db: Session,
+    cip13: str,
+    new_pfht: float,
+    source: str = "import_manuel",
+    user_email: Optional[str] = None
+) -> bool:
+    """
+    Met à jour le prix PFHT d'une equivalence BDPM et enregistre l'historique.
+
+    Args:
+        db: Session SQLAlchemy
+        cip13: Code CIP13 du produit
+        new_pfht: Nouveau prix PFHT
+        source: Source de la mise à jour (import_manuel, bdpm, api_externe, etc.)
+        user_email: Email de l'utilisateur qui fait la modification
+
+    Returns:
+        True si le prix a été mis à jour, False sinon
+    """
+    from sqlalchemy import text
+
+    # 1. Récupérer l'ancienne valeur
+    result = db.execute(
+        text("SELECT pfht, prix_source FROM bdpm_equivalences WHERE cip13 = :cip13"),
+        {"cip13": cip13}
+    ).first()
+
+    if not result:
+        logger.warning(f"CIP {cip13} non trouvé dans bdpm_equivalences")
+        return False
+
+    old_pfht = result.pfht
+    old_source = result.prix_source
+
+    # Si même prix, pas besoin de mise à jour
+    if old_pfht == new_pfht:
+        return False
+
+    # 2. Enregistrer dans l'historique
+    db.execute(
+        text("""
+            INSERT INTO bdpm_prix_historique (cip13, old_pfht, new_pfht, source, changed_by)
+            VALUES (:cip13, :old_pfht, :new_pfht, :source, :changed_by)
+        """),
+        {
+            "cip13": cip13,
+            "old_pfht": old_pfht,
+            "new_pfht": new_pfht,
+            "source": source,
+            "changed_by": user_email
+        }
+    )
+
+    # 3. Mettre à jour le prix
+    db.execute(
+        text("""
+            UPDATE bdpm_equivalences
+            SET pfht = :new_pfht, prix_source = :source, updated_at = NOW()
+            WHERE cip13 = :cip13
+        """),
+        {"new_pfht": new_pfht, "source": source, "cip13": cip13}
+    )
+
+    db.commit()
+
+    logger.info(f"Prix CIP {cip13} mis à jour: {old_pfht} -> {new_pfht} (source: {source})")
+    return True
+
+
+def get_princeps_by_groupe(db: Session, groupe_generique_id: int) -> Optional[Dict]:
+    """
+    Retourne le princeps (type_generique=0) d'un groupe générique.
+
+    Args:
+        db: Session SQLAlchemy
+        groupe_generique_id: ID du groupe générique
+
+    Returns:
+        Dict avec les infos du princeps ou None si pas trouvé
+    """
+    from sqlalchemy import text
+
+    result = db.execute(
+        text("""
+            SELECT cip13, denomination, pfht, prix_source
+            FROM bdpm_equivalences
+            WHERE groupe_generique_id = :groupe_id
+            AND type_generique = 0
+            LIMIT 1
+        """),
+        {"groupe_id": groupe_generique_id}
+    ).first()
+
+    if not result:
+        return None
+
+    return {
+        "cip13": result.cip13,
+        "denomination": result.denomination,
+        "pfht": float(result.pfht) if result.pfht else None,
+        "prix_source": result.prix_source
+    }
+
+
+def get_pfht_history(db: Session, cip13: str, limit: int = 10) -> List[Dict]:
+    """
+    Retourne l'historique des prix pour un CIP.
+
+    Args:
+        db: Session SQLAlchemy
+        cip13: Code CIP13 du produit
+        limit: Nombre maximum d'entrées à retourner
+
+    Returns:
+        Liste des changements de prix
+    """
+    from sqlalchemy import text
+
+    results = db.execute(
+        text("""
+            SELECT old_pfht, new_pfht, source, changed_by, changed_at
+            FROM bdpm_prix_historique
+            WHERE cip13 = :cip13
+            ORDER BY changed_at DESC
+            LIMIT :limit
+        """),
+        {"cip13": cip13, "limit": limit}
+    ).fetchall()
+
+    return [
+        {
+            "old_pfht": float(r.old_pfht) if r.old_pfht else None,
+            "new_pfht": float(r.new_pfht) if r.new_pfht else None,
+            "source": r.source,
+            "changed_by": r.changed_by,
+            "changed_at": r.changed_at.isoformat() if r.changed_at else None
+        }
+        for r in results
+    ]

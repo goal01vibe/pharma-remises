@@ -122,6 +122,109 @@ def compare_catalogues(labo1_id: int, labo2_id: int, db: Session = Depends(get_d
     }
 
 
+@router.get("/compare-detail/{labo1_id}/{labo2_id}")
+def compare_catalogues_detail(labo1_id: int, labo2_id: int, db: Session = Depends(get_db)):
+    """
+    Compare les catalogues de deux laboratoires avec le détail des produits.
+    Retourne les produits communs (par groupe générique) et exclusifs avec:
+    - nom_commercial, code_cip, prix BDPM, prix catalogue, remise
+    """
+    from app.models import Laboratoire, BdpmEquivalence
+
+    # Vérifier que les labos existent
+    labo1 = db.query(Laboratoire).filter(Laboratoire.id == labo1_id).first()
+    labo2 = db.query(Laboratoire).filter(Laboratoire.id == labo2_id).first()
+
+    if not labo1 or not labo2:
+        raise HTTPException(status_code=404, detail="Laboratoire non trouvé")
+
+    # Récupérer les produits de chaque labo (seulement ceux avec groupe générique)
+    produits1 = db.query(CatalogueProduit).filter(
+        CatalogueProduit.laboratoire_id == labo1_id,
+        CatalogueProduit.groupe_generique_id.isnot(None)
+    ).all()
+    produits2 = db.query(CatalogueProduit).filter(
+        CatalogueProduit.laboratoire_id == labo2_id,
+        CatalogueProduit.groupe_generique_id.isnot(None)
+    ).all()
+
+    # Récupérer les prix BDPM pour tous les CIP concernés
+    all_cips = [p.code_cip for p in produits1 + produits2 if p.code_cip]
+    bdpm_prices = {}
+    if all_cips:
+        bdpm_results = db.query(BdpmEquivalence.cip13, BdpmEquivalence.pfht).filter(
+            BdpmEquivalence.cip13.in_(all_cips)
+        ).all()
+        bdpm_prices = {r.cip13: float(r.pfht) if r.pfht else None for r in bdpm_results}
+
+    def product_to_dict(p):
+        return {
+            'id': p.id,
+            'nom_commercial': p.nom_commercial,
+            'code_cip': p.code_cip,
+            'prix_bdpm': bdpm_prices.get(p.code_cip) if p.code_cip else (float(p.prix_fabricant) if p.prix_fabricant else None),
+            'prix_catalogue': float(p.prix_ht) if p.prix_ht else None,
+            'remise_pct': float(p.remise_pct) if p.remise_pct else None,
+            'groupe_generique_id': p.groupe_generique_id,
+            'libelle_groupe': p.libelle_groupe,
+        }
+
+    # Index par groupe générique
+    groupes1 = {}
+    for p in produits1:
+        gid = p.groupe_generique_id
+        if gid not in groupes1:
+            groupes1[gid] = []
+        groupes1[gid].append(product_to_dict(p))
+
+    groupes2 = {}
+    for p in produits2:
+        gid = p.groupe_generique_id
+        if gid not in groupes2:
+            groupes2[gid] = []
+        groupes2[gid].append(product_to_dict(p))
+
+    set1 = set(groupes1.keys())
+    set2 = set(groupes2.keys())
+
+    # Calculer les différences
+    communs_ids = set1 & set2
+    only1_ids = set1 - set2
+    only2_ids = set2 - set1
+
+    # Construire les listes de produits
+    def flatten_products(gids, groupes_dict):
+        """Aplati les produits de plusieurs groupes en une seule liste triée."""
+        products = []
+        for gid in gids:
+            products.extend(groupes_dict[gid])
+        return sorted(products, key=lambda x: x['nom_commercial'] or '')
+
+    # Pour les communs, on retourne les produits des deux labos
+    communs_produits = {
+        'labo1': flatten_products(communs_ids, groupes1),
+        'labo2': flatten_products(communs_ids, groupes2),
+    }
+
+    return {
+        'labo1': {'id': labo1_id, 'nom': labo1.nom, 'total_groupes': len(set1), 'total_produits': len(produits1)},
+        'labo2': {'id': labo2_id, 'nom': labo2.nom, 'total_groupes': len(set2), 'total_produits': len(produits2)},
+        'communes': {
+            'count': len(communs_ids),
+            'produits_labo1': communs_produits['labo1'],
+            'produits_labo2': communs_produits['labo2'],
+        },
+        'only_labo1': {
+            'count': len(only1_ids),
+            'produits': flatten_products(only1_ids, groupes1),
+        },
+        'only_labo2': {
+            'count': len(only2_ids),
+            'produits': flatten_products(only2_ids, groupes2),
+        }
+    }
+
+
 @router.get("/{produit_id}", response_model=CatalogueProduitResponse)
 def get_produit(produit_id: int, db: Session = Depends(get_db)):
     """Recupere un produit par ID."""

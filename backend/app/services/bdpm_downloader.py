@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.models import BdpmEquivalence, BdpmFileStatus
+from app.services.bdpm_import import extract_conditionnement
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +230,7 @@ def parse_cis_gener(filepath: Path) -> Dict[str, Dict]:
                     if cis:
                         cis_to_denomination[cis] = denomination
 
-    # 2. Parser CIS_CIP pour avoir les CIP13 et les prix
+    # 2. Parser CIS_CIP pour avoir les CIP13, les prix et le conditionnement
     cip_filepath = filepath.parent / "CIS_CIP_bdpm.txt"
     cis_to_cips: Dict[str, List[Dict]] = {}
     if cip_filepath.exists():
@@ -238,6 +239,7 @@ def parse_cis_gener(filepath: Path) -> Dict[str, Dict]:
                 parts = line.strip().split('\t')
                 if len(parts) >= 7:
                     cis = parts[0]
+                    libelle_presentation = parts[2] if len(parts) >= 3 else ""
                     cip13 = parts[6]
                     # Prix PFHT en colonne 10 (index 9)
                     pfht = None
@@ -247,10 +249,17 @@ def parse_cis_gener(filepath: Path) -> Dict[str, Dict]:
                         except ValueError:
                             pass
 
+                    # Extraire conditionnement du libelle
+                    conditionnement = extract_conditionnement(libelle_presentation)
+
                     if cis and cip13 and len(cip13) == 13 and cip13.isdigit():
                         if cis not in cis_to_cips:
                             cis_to_cips[cis] = []
-                        cis_to_cips[cis].append({"cip13": cip13, "pfht": pfht})
+                        cis_to_cips[cis].append({
+                            "cip13": cip13,
+                            "pfht": pfht,
+                            "conditionnement": conditionnement
+                        })
 
     # 3. Parser CIS_GENER et collecter les princeps par groupe
     groupe_to_princeps: Dict[int, str] = {}  # groupe_id -> denomination du princeps
@@ -278,6 +287,7 @@ def parse_cis_gener(filepath: Path) -> Dict[str, Dict]:
                 for cip_info in cip_infos:
                     cip13 = cip_info["cip13"]
                     pfht = cip_info["pfht"]
+                    conditionnement = cip_info.get("conditionnement")
                     result[cip13] = {
                         "cis": cis,
                         "groupe_generique_id": groupe_id_int,
@@ -285,6 +295,7 @@ def parse_cis_gener(filepath: Path) -> Dict[str, Dict]:
                         "type_generique": type_gen_int,
                         "pfht": pfht,
                         "denomination": denomination,
+                        "conditionnement": conditionnement,
                     }
 
     # 4. Ajouter le princeps_denomination a chaque entree
@@ -304,7 +315,7 @@ async def check_and_update_bdpm(db: Session, force: bool = False) -> Dict:
 
     Args:
         db: Session SQLAlchemy
-        force: Si True, force le telechargement meme si le hash n'a pas change
+        force: Si True, force le telechargement ET la re-integration complete
 
     Returns:
         Dict avec les resultats de la mise a jour
@@ -314,6 +325,8 @@ async def check_and_update_bdpm(db: Session, force: bool = False) -> Dict:
         "files_updated": 0,
         "new_cips": 0,
         "removed_cips": 0,
+        "updated_cips": 0,
+        "force_reintegration": force,
         "details": [],
     }
 
@@ -357,12 +370,15 @@ async def check_and_update_bdpm(db: Session, force: bool = False) -> Dict:
             "hash_changed": hash_changed,
         })
 
-    # Si CIS_GENER a change, mettre a jour la base
+    # Si CIS_GENER a change OU force=True, mettre a jour la base
     gener_status = get_file_status(db, "CIS_GENER_bdpm.txt")
-    if gener_status and results["files_updated"] > 0:
+    should_integrate = results["files_updated"] > 0 or force
+
+    if gener_status and should_integrate:
         integration_result = integrate_bdpm_to_database(db)
         results["new_cips"] = integration_result["new_cips"]
         results["removed_cips"] = integration_result["removed_cips"]
+        results["updated_cips"] = integration_result.get("updated_cips", 0)
 
         update_file_status(
             db,
@@ -424,11 +440,12 @@ def integrate_bdpm_to_database(db: Session) -> Dict:
             pfht=data.get("pfht"),
             denomination=data.get("denomination"),
             princeps_denomination=data.get("princeps_denomination"),
+            conditionnement=data.get("conditionnement"),
             absent_bdpm=False,
         )
         db.add(record)
 
-    # Mettre a jour les CIP existants (prix, denomination, princeps)
+    # Mettre a jour les CIP existants (prix, denomination, princeps, conditionnement)
     existing_to_update = bdpm_cips & existing_cips
     for cip13 in existing_to_update:
         data = bdpm_data[cip13]
@@ -439,6 +456,8 @@ def integrate_bdpm_to_database(db: Session) -> Dict:
             update_fields["denomination"] = data["denomination"]
         if data.get("princeps_denomination"):
             update_fields["princeps_denomination"] = data["princeps_denomination"]
+        if data.get("conditionnement") is not None:
+            update_fields["conditionnement"] = data["conditionnement"]
 
         if update_fields:
             db.query(BdpmEquivalence).filter(

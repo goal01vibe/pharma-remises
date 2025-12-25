@@ -19,6 +19,7 @@ import type {
   RegleRemontee,
   RegleRemonteeCreate,
   CatalogueComparison,
+  CatalogueComparisonDetail,
 } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8847'
@@ -135,6 +136,11 @@ export const catalogueApi = {
 
   compare: async (labo1Id: number, labo2Id: number): Promise<CatalogueComparison> => {
     const { data } = await api.get(`/api/catalogue/compare/${labo1Id}/${labo2Id}`)
+    return data
+  },
+
+  compareDetail: async (labo1Id: number, labo2Id: number): Promise<CatalogueComparisonDetail> => {
+    const { data } = await api.get(`/api/catalogue/compare-detail/${labo1Id}/${labo2Id}`)
     return data
   },
 }
@@ -555,6 +561,8 @@ export interface SimulationLineResult {
   montant_ht: number
   produit_id?: number
   produit_nom?: string
+  produit_cip?: string  // CIP du produit catalogue matche
+  groupe_generique_id?: number  // Pour ouvrir le drawer groupe
   disponible: boolean
   match_score?: number
   match_type?: string
@@ -936,9 +944,18 @@ export interface RattachementItem {
   groupe_generique_id: number
 }
 
+export interface RattachementAlerte {
+  vente_id: number
+  cip13: string
+  conditionnement_cip: number | null
+  conditionnements_groupe: number[]
+  message: string
+}
+
 export interface RattachementResponse {
   rattaches: number
   erreurs: Array<{ vente_id: number; erreur: string }>
+  alertes: RattachementAlerte[]
   message: string
 }
 
@@ -1016,13 +1033,6 @@ export interface RapprochementResult {
   }
 }
 
-export interface MemoryStats {
-  total_cips: number
-  total_groupes: number
-  validated: number
-  pending_validation: number
-}
-
 export const repertoireApi = {
   // Repertoire
   list: async (params?: {
@@ -1056,7 +1066,7 @@ export const repertoireApi = {
     return data
   },
 
-  checkBdpmUpdates: async (force?: boolean): Promise<{ checked: boolean; files_updated: number; new_cips: number; removed_cips: number; details: unknown[] }> => {
+  checkBdpmUpdates: async (force?: boolean): Promise<{ checked: boolean; files_updated: number; new_cips: number; updated_cips: number; removed_cips: number; force_reintegration?: boolean; details: unknown[] }> => {
     const { data } = await api.post('/repertoire/bdpm/check', null, { params: { force } })
     return data
   },
@@ -1096,22 +1106,6 @@ export const repertoireApi = {
 
   rattacherFuzzy: async (rattachements: RattachementItem[]): Promise<RattachementResponse> => {
     const { data } = await api.post('/repertoire/rapprochement/rattacher', { rattachements })
-    return data
-  },
-
-  // Memoire Matching
-  getMemoryStats: async (): Promise<MemoryStats> => {
-    const { data } = await api.get('/repertoire/memory/stats')
-    return data
-  },
-
-  getEquivalents: async (cip13: string): Promise<Array<{ cip13: string; designation: string; source: string; groupe_generique_id: number | null; match_origin: string; match_score: number | null; validated: boolean }>> => {
-    const { data } = await api.get(`/repertoire/memory/equivalents/${cip13}`)
-    return data
-  },
-
-  populateFromBdpm: async (): Promise<{ groupes_processed: number; cips_added: number; groupes_created: number }> => {
-    const { data } = await api.post('/repertoire/memory/populate-from-bdpm')
     return data
   },
 }

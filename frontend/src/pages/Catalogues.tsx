@@ -37,6 +37,7 @@ import { Search, Package, AlertCircle, CheckCircle2, Trash2, ArrowUpDown, ArrowU
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { laboratoiresApi, catalogueApi } from '@/lib/api'
 import { formatCurrency, formatPercent } from '@/lib/utils'
+import { GroupeDrawer } from '@/components/GroupeDrawer'
 
 type SortKey = 'code_cip' | 'nom_commercial' | 'molecule' | 'prix_ht' | 'remise_pct' | 'remontee_pct'
 type SortOrder = 'asc' | 'desc'
@@ -50,6 +51,8 @@ export function Catalogues() {
   const [clearConfirmText, setClearConfirmText] = useState('')
   const [sortKey, setSortKey] = useState<SortKey | null>(null)
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
+  const [selectedGroupe, setSelectedGroupe] = useState<number | null>(null)
+  const [selectedCip, setSelectedCip] = useState<string>()
   const selectedLaboId = searchParams.get('labo')
   const queryClient = useQueryClient()
 
@@ -338,10 +341,18 @@ export function Catalogues() {
                     const status = getRemonteeStatus(produit.remontee_pct)
                     const priceStyle = getPriceSourceStyle(produit.prix_source)
                     const displayPrice = produit.prix_ht ?? produit.prix_fabricant
+                    const groupeId = (produit as { groupe_generique_id?: number }).groupe_generique_id ||
+                      (produit.presentation as { groupe_generique_id?: number } | null)?.groupe_generique_id
                     return (
                       <TableRow
                         key={produit.id}
-                        className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}
+                        className={`${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} ${groupeId ? 'cursor-pointer hover:bg-muted/50' : ''}`}
+                        onClick={() => {
+                          if (groupeId) {
+                            setSelectedGroupe(groupeId)
+                            setSelectedCip(produit.code_cip || undefined)
+                          }
+                        }}
                       >
                         <TableCell className="text-muted-foreground text-sm">{index + 1}</TableCell>
                         <TableCell className="font-mono text-sm">
@@ -453,6 +464,14 @@ export function Catalogues() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* Drawer details groupe */}
+        <GroupeDrawer
+          groupeId={selectedGroupe}
+          currentCip={selectedCip}
+          open={!!selectedGroupe}
+          onClose={() => setSelectedGroupe(null)}
+        />
       </div>
     </div>
   )

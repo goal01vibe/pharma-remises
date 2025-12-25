@@ -77,6 +77,7 @@ docker run -it --rm ^
     -v %USERPROFILE%\.claude:/home/claude/.claude ^
     --network host ^
     -e ANTHROPIC_API_KEY=%ANTHROPIC_API_KEY% ^
+    -e NODE_OPTIONS=--max-old-space-size=4096 ^
     %IMAGE_NAME% ^
     claude --dangerously-skip-permissions
 

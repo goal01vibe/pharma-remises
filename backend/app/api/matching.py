@@ -175,6 +175,11 @@ def process_sales_matching(
     # Initialiser le matcher
     matcher = IntelligentMatcher(db)
 
+    # === INVALIDATION CACHE si force_rematch ===
+    if force_rematch:
+        matcher.clear_cache()
+        matching_logger.info(f"Cache IntelligentMatcher invalide pour force_rematch")
+
     # Supprimer les anciens matchings pour cet import
     db.query(VenteMatching).filter(
         VenteMatching.vente_id.in_(vente_ids)
@@ -182,20 +187,32 @@ def process_sales_matching(
     db.commit()
     matching_logger.debug(f"Anciens matchings supprimes pour import {request.import_id}")
 
-    # === OPTIMISATION: Pre-indexer les produits par groupe_generique_id ===
-    # Cela permet une jointure instantanee au lieu du fuzzy matching
+    # === OPTIMISATION: Pre-indexer les produits ===
+    # 1. Index par CIP pour matching exact (prioritaire)
+    products_by_cip = {}
+    # 2. Index par groupe_generique_id pour matching groupe
     products_by_groupe = {}
+
     for labo_id in labo_ids:
         products = db.query(CatalogueProduit).filter(
             CatalogueProduit.laboratoire_id == labo_id,
-            CatalogueProduit.actif == True,
-            CatalogueProduit.groupe_generique_id.isnot(None)
+            CatalogueProduit.actif == True
         ).all()
         for p in products:
-            key = (p.groupe_generique_id, labo_id)
-            if key not in products_by_groupe:
-                products_by_groupe[key] = []
-            products_by_groupe[key].append(p)
+            # Index par CIP (pour matching exact)
+            if p.code_cip:
+                cip_key = (p.code_cip, labo_id)
+                products_by_cip[cip_key] = p
+
+            # Index par groupe_generique
+            if p.groupe_generique_id:
+                groupe_key = (p.groupe_generique_id, labo_id)
+                if groupe_key not in products_by_groupe:
+                    products_by_groupe[groupe_key] = []
+                products_by_groupe[groupe_key].append(p)
+
+    # Log index sizes
+    matching_logger.debug(f"Index CIP: {len(products_by_cip)} produits, Index Groupe: {len(products_by_groupe)} groupes")
 
     # Stats
     matched_ventes = set()
@@ -203,7 +220,7 @@ def process_sales_matching(
     by_lab_stats = {l.id: {"lab_id": l.id, "lab_nom": l.nom, "matched_count": 0, "total_montant": Decimal("0")} for l in labos}
 
     # Compteurs pour stats de type de matching
-    match_type_stats = {"groupe_generique": 0, "fuzzy": 0, "no_match": 0}
+    match_type_stats = {"exact_cip": 0, "groupe_generique": 0, "fuzzy": 0, "no_match": 0}
 
     # Matcher chaque vente
     for vente in ventes:
@@ -223,23 +240,49 @@ def process_sales_matching(
 
         # Trouver les matches dans tous les labos
         has_match = False
-        candidates_for_debug = []
 
         for labo_id in labo_ids:
             matched_product = None
             match_type = None
             match_score = 0.0
 
-            # === OPTIMISATION: D'abord essayer la jointure groupe_generique_id (INSTANTANE) ===
-            if groupe_id:
-                key = (groupe_id, labo_id)
-                if key in products_by_groupe:
-                    # Prendre le premier produit du groupe (ils sont tous equivalents)
-                    matched_product = products_by_groupe[key][0]
-                    match_type = "groupe_generique"
-                    match_score = 100.0  # Match exact par groupe
+            # === PRIORITE 1: Matching CIP EXACT (le plus fiable) ===
+            if code_cip:
+                cip_key = (code_cip, labo_id)
+                if cip_key in products_by_cip:
+                    matched_product = products_by_cip[cip_key]
+                    match_type = "exact_cip"
+                    match_score = 100.0
 
-            # === FALLBACK: Si pas de match par groupe, utiliser fuzzy (lent) ===
+            # === PRIORITE 2: Matching par groupe_generique avec verification conditionnement ===
+            if not matched_product and groupe_id:
+                groupe_key = (groupe_id, labo_id)
+                if groupe_key in products_by_groupe:
+                    candidates = products_by_groupe[groupe_key]
+
+                    # Extraire le conditionnement de la vente si disponible
+                    vente_cond = getattr(vente, 'conditionnement', None)
+
+                    # Chercher un produit avec le meme conditionnement
+                    best_match = None
+                    for prod in candidates:
+                        prod_cond = getattr(prod, 'conditionnement', None)
+                        if vente_cond and prod_cond and vente_cond == prod_cond:
+                            best_match = prod
+                            break
+
+                    # Si pas de match exact sur conditionnement, prendre le premier
+                    if best_match:
+                        matched_product = best_match
+                        match_type = "groupe_generique"
+                        match_score = 100.0
+                    elif candidates:
+                        # Match par groupe mais conditionnement different
+                        matched_product = candidates[0]
+                        match_type = "groupe_generique"
+                        match_score = 95.0  # Score reduit car conditionnement non verifie
+
+            # === PRIORITE 3: Fuzzy matching (fallback) ===
             if not matched_product:
                 matches = matcher.find_matches_for_product(
                     designation=designation,
@@ -248,7 +291,6 @@ def process_sales_matching(
                 )
                 if matches and matches[0].score >= request.min_score:
                     best = matches[0]
-                    # Recuperer le produit pour l'objet VenteMatching
                     matched_product = db.query(CatalogueProduit).filter(
                         CatalogueProduit.id == best.produit_id
                     ).first()
@@ -275,7 +317,9 @@ def process_sales_matching(
                 by_lab_stats[labo_id]["total_montant"] += vente.montant_annuel or Decimal("0")
 
                 # Stats par type
-                if match_type == "groupe_generique":
+                if match_type == "exact_cip":
+                    match_type_stats["exact_cip"] += 1
+                elif match_type == "groupe_generique":
                     match_type_stats["groupe_generique"] += 1
                 else:
                     match_type_stats["fuzzy"] += 1

@@ -320,3 +320,33 @@ export interface CatalogueComparison {
   only_labo1: MoleculeSet
   only_labo2: MoleculeSet
 }
+
+// Comparaison détaillée avec produits
+export interface CatalogueProduitDetail {
+  id: number
+  nom_commercial: string | null
+  code_cip: string | null
+  prix_bdpm: number | null
+  prix_catalogue: number | null
+  remise_pct: number | null
+  groupe_generique_id: number | null
+  libelle_groupe: string | null
+}
+
+export interface CatalogueComparisonDetail {
+  labo1: LaboInfo
+  labo2: LaboInfo
+  communes: {
+    count: number
+    produits_labo1: CatalogueProduitDetail[]
+    produits_labo2: CatalogueProduitDetail[]
+  }
+  only_labo1: {
+    count: number
+    produits: CatalogueProduitDetail[]
+  }
+  only_labo2: {
+    count: number
+    produits: CatalogueProduitDetail[]
+  }
+}

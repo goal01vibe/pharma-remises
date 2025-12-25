@@ -33,10 +33,10 @@ async def get_groupe_details(groupe_id: int, db: Session = Depends(get_db)):
     # Query the bdpm_equivalences table
     equivalents = db.execute(
         text("""
-            SELECT cip13, denomination, type_generique, pfht
+            SELECT cip13, denomination, type_generique, pfht, conditionnement
             FROM bdpm_equivalences
             WHERE groupe_generique_id = :groupe_id
-            ORDER BY type_generique ASC, denomination ASC
+            ORDER BY type_generique ASC, conditionnement ASC, denomination ASC
         """),
         {"groupe_id": groupe_id}
     ).fetchall()
@@ -53,7 +53,8 @@ async def get_groupe_details(groupe_id: int, db: Session = Depends(get_db)):
             "denomination": eq.denomination,
             "pfht": float(eq.pfht) if eq.pfht else None,
             "type_generique": eq.type_generique,
-            "labo": extract_labo_from_denomination(eq.denomination)
+            "labo": extract_labo_from_denomination(eq.denomination),
+            "conditionnement": eq.conditionnement
         }
         if eq.type_generique == 0:
             princeps = item
@@ -87,10 +88,10 @@ async def get_groupe_membres(groupe_id: int, db: Session = Depends(get_db)):
     """
     membres = db.execute(
         text("""
-            SELECT cip13, denomination, type_generique, pfht, match_origin
+            SELECT cip13, denomination, type_generique, pfht, match_origin, conditionnement
             FROM bdpm_equivalences
             WHERE groupe_generique_id = :groupe_id
-            ORDER BY type_generique ASC, denomination ASC
+            ORDER BY type_generique ASC, conditionnement ASC, denomination ASC
         """),
         {"groupe_id": groupe_id}
     ).fetchall()
@@ -102,7 +103,8 @@ async def get_groupe_membres(groupe_id: int, db: Session = Depends(get_db)):
             "type_generique": m.type_generique,
             "pfht": float(m.pfht) if m.pfht else None,
             "match_origin": m.match_origin,
-            "labo": extract_labo_from_denomination(m.denomination)
+            "labo": extract_labo_from_denomination(m.denomination),
+            "conditionnement": m.conditionnement
         }
         for m in membres
     ]

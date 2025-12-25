@@ -290,7 +290,11 @@ class BdpmEquivalence(Base):
     princeps_denomination = Column(String(500), nullable=True)  # Nom du princeps du groupe
     absent_bdpm = Column(Boolean, default=False)  # True si absent de la derniere BDPM
     match_origin = Column(String(50), nullable=True)  # 'bdpm' (import), 'fuzzy' (user validated)
+    conditionnement = Column(Integer, nullable=True)  # Nombre d'unites (30, 90, etc.)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Colonnes ajoutees par migrations 008 et 014
+    labo_extracted = Column(String(100), nullable=True)  # Laboratoire extrait du nom
+    integrated_at = Column(DateTime(timezone=True), nullable=True)  # Date d'integration
 
 
 class MatchingMemory(Base):
@@ -313,6 +317,11 @@ class MatchingMemory(Base):
     validated = Column(Boolean, default=False)  # Valide par l'utilisateur
     validated_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Colonnes ajoutees par migration 009
+    matched_cip13 = Column(String(13), nullable=True)  # CIP du produit matche
+    matched_denomination = Column(Text, nullable=True)  # Denomination du produit matche
+    pfht = Column(Numeric(10, 4), nullable=True)  # Prix fabricant HT
+    matched_at = Column(DateTime(timezone=True), server_default=func.now())  # Date du match
 
 
 class BdpmFileStatus(Base):

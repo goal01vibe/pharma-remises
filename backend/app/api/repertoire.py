@@ -821,11 +821,13 @@ def rattacher_fuzzy(
     - Met a jour le libelle_groupe
     - Set type_generique = 1 (generique)
     - Set match_origin = 'fuzzy' pour tracer l'origine du match
+    - Verifie le conditionnement: si pas de correspondance exacte, alerte sans prix
 
     Le badge 'Fuzzy' sera affiche partout ou ce CIP apparait.
     """
     rattaches = 0
     erreurs = []
+    alertes = []  # Alertes pour conditionnement non trouve
 
     for item in request.rattachements:
         cip13 = item.cip13.zfill(13) if item.cip13 else None
@@ -833,17 +835,47 @@ def rattacher_fuzzy(
             erreurs.append({"vente_id": item.vente_id, "erreur": "CIP manquant"})
             continue
 
-        # Recuperer les infos du groupe propose
-        groupe_ref = db.query(BdpmEquivalence).filter(
+        # Recuperer tous les membres du groupe avec leur conditionnement et PFHT
+        membres_groupe = db.query(BdpmEquivalence).filter(
             BdpmEquivalence.groupe_generique_id == item.groupe_generique_id
-        ).first()
+        ).all()
 
-        if not groupe_ref:
+        if not membres_groupe:
             erreurs.append({"vente_id": item.vente_id, "erreur": f"Groupe {item.groupe_generique_id} non trouve"})
             continue
 
+        groupe_ref = membres_groupe[0]
+
         # Chercher le CIP dans bdpm_equivalences
         bdpm = db.query(BdpmEquivalence).filter(BdpmEquivalence.cip13 == cip13).first()
+
+        # Determiner le conditionnement du CIP
+        cip_conditionnement = None
+        if bdpm and bdpm.conditionnement:
+            cip_conditionnement = bdpm.conditionnement
+
+        # Chercher un membre du groupe avec le meme conditionnement
+        pfht_to_use = None
+        conditionnement_trouve = False
+        conditionnements_disponibles = []
+
+        for membre in membres_groupe:
+            if membre.conditionnement:
+                conditionnements_disponibles.append(membre.conditionnement)
+            if cip_conditionnement and membre.conditionnement == cip_conditionnement and membre.pfht:
+                pfht_to_use = membre.pfht
+                conditionnement_trouve = True
+                break
+
+        # Si pas de conditionnement connu pour le CIP, ou pas de correspondance
+        if not conditionnement_trouve and cip_conditionnement:
+            alertes.append({
+                "vente_id": item.vente_id,
+                "cip13": cip13,
+                "conditionnement_cip": cip_conditionnement,
+                "conditionnements_groupe": list(set(conditionnements_disponibles)),
+                "message": f"Conditionnement {cip_conditionnement} non trouve dans le groupe (disponibles: {list(set(conditionnements_disponibles))})"
+            })
 
         if bdpm:
             # Mettre a jour le CIP existant
@@ -851,27 +883,48 @@ def rattacher_fuzzy(
             bdpm.libelle_groupe = groupe_ref.libelle_groupe
             bdpm.type_generique = 1  # Generique
             bdpm.match_origin = 'fuzzy'
-            # Copier le pfht du groupe si le CIP n'en a pas
-            if not bdpm.pfht and groupe_ref.pfht:
-                bdpm.pfht = groupe_ref.pfht
+            # Copier le pfht seulement si conditionnement correspond
+            if not bdpm.pfht and pfht_to_use:
+                bdpm.pfht = pfht_to_use
+            elif not bdpm.pfht and not conditionnement_trouve and not cip_conditionnement:
+                # Pas de conditionnement connu, on prend le premier prix disponible mais on alerte
+                for membre in membres_groupe:
+                    if membre.pfht:
+                        bdpm.pfht = membre.pfht
+                        alertes.append({
+                            "vente_id": item.vente_id,
+                            "cip13": cip13,
+                            "conditionnement_cip": None,
+                            "conditionnements_groupe": list(set(conditionnements_disponibles)),
+                            "message": "Conditionnement inconnu - prix par defaut applique (a verifier)"
+                        })
+                        break
         else:
             # Le CIP n'existe pas dans bdpm_equivalences, on doit le creer
-            # Recuperer la designation depuis la vente
             vente = db.query(MesVentes).filter(MesVentes.id == item.vente_id).first()
             denomination = vente.designation if vente else None
 
+            # Sans conditionnement connu, on ne met pas de prix
             new_bdpm = BdpmEquivalence(
                 cip13=cip13,
                 groupe_generique_id=item.groupe_generique_id,
                 libelle_groupe=groupe_ref.libelle_groupe,
                 type_generique=1,  # Generique
-                pfht=groupe_ref.pfht,
+                pfht=None,  # Pas de prix sans conditionnement verifie
                 denomination=denomination,
                 princeps_denomination=groupe_ref.princeps_denomination,
                 absent_bdpm=False,
                 match_origin='fuzzy'
             )
             db.add(new_bdpm)
+
+            alertes.append({
+                "vente_id": item.vente_id,
+                "cip13": cip13,
+                "conditionnement_cip": None,
+                "conditionnements_groupe": list(set(conditionnements_disponibles)),
+                "message": "Nouveau CIP sans conditionnement - pas de prix attribue"
+            })
 
         rattaches += 1
 
@@ -880,7 +933,8 @@ def rattacher_fuzzy(
     return {
         "rattaches": rattaches,
         "erreurs": erreurs,
-        "message": f"{rattaches} CIP(s) rattache(s) avec succes"
+        "alertes": alertes,
+        "message": f"{rattaches} CIP(s) rattache(s) avec succes" + (f" ({len(alertes)} alerte(s) conditionnement)" if alertes else "")
     }
 
 

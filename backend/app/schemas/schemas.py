@@ -148,6 +148,10 @@ class MesVentesResponse(BaseModel):
     montant_annuel: Optional[Decimal] = None
     created_at: datetime
     presentation: Optional[PresentationResponse] = None
+    # Champs BDPM pour enrichissement
+    prix_bdpm: Optional[Decimal] = None
+    has_bdpm_price: Optional[bool] = False
+    groupe_generique_id: Optional[int] = None
 
 
 # =====================
@@ -398,6 +402,8 @@ class SimulationLineResult(BaseModel):
     montant_ht: Decimal
     produit_id: Optional[int] = None
     produit_nom: Optional[str] = None
+    produit_cip: Optional[str] = None  # CIP du produit catalogue matche
+    groupe_generique_id: Optional[int] = None  # Pour ouvrir le drawer groupe
     disponible: bool
     match_score: Optional[float] = None
     match_type: Optional[str] = None

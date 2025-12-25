@@ -31,7 +31,8 @@ import { GitCompare, Trophy, FlaskConical, Search } from 'lucide-react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { scenariosApi, comparaisonApi, laboratoiresApi, catalogueApi } from '@/lib/api'
 import { formatCurrency, formatPercent } from '@/lib/utils'
-import type { ComparaisonScenarios, CatalogueComparison } from '@/types'
+import { GroupeDrawer } from '@/components/GroupeDrawer'
+import type { ComparaisonScenarios, CatalogueComparisonDetail, CatalogueProduitDetail } from '@/types'
 
 export function Comparaison() {
   // Scenarios comparison state
@@ -41,9 +42,13 @@ export function Comparaison() {
   // Catalogue comparison state
   const [labo1Id, setLabo1Id] = useState<number | null>(null)
   const [labo2Id, setLabo2Id] = useState<number | null>(null)
-  const [catalogueComparison, setCatalogueComparison] = useState<CatalogueComparison | null>(null)
+  const [catalogueComparison, setCatalogueComparison] = useState<CatalogueComparisonDetail | null>(null)
   const [searchFilter, setSearchFilter] = useState('')
   const [activeSection, setActiveSection] = useState<'communes' | 'only1' | 'only2'>('communes')
+
+  // GroupeDrawer state
+  const [selectedGroupe, setSelectedGroupe] = useState<number | null>(null)
+  const [selectedCip, setSelectedCip] = useState<string>()
 
   const { data: scenarios = [], isLoading } = useQuery({
     queryKey: ['scenarios'],
@@ -64,7 +69,7 @@ export function Comparaison() {
 
   const catalogueCompareMutation = useMutation({
     mutationFn: ({ labo1, labo2 }: { labo1: number; labo2: number }) =>
-      catalogueApi.compare(labo1, labo2),
+      catalogueApi.compareDetail(labo1, labo2),
     onSuccess: (data) => {
       setCatalogueComparison(data)
     },
@@ -88,12 +93,36 @@ export function Comparaison() {
     }
   }
 
-  // Filter molecules by search
-  const filterMolecules = (molecules: string[]) => {
-    if (!searchFilter) return molecules
-    return molecules.filter((m) =>
-      m.toLowerCase().includes(searchFilter.toLowerCase())
+  // Get current products list based on active section
+  const getCurrentProducts = (): CatalogueProduitDetail[] => {
+    if (!catalogueComparison) return []
+
+    if (activeSection === 'communes') {
+      // Pour les communs, on peut afficher labo1 ou labo2
+      return catalogueComparison.communes.produits_labo1
+    } else if (activeSection === 'only1') {
+      return catalogueComparison.only_labo1.produits
+    } else {
+      return catalogueComparison.only_labo2.produits
+    }
+  }
+
+  // Filter products by search
+  const filterProducts = (products: CatalogueProduitDetail[]) => {
+    if (!searchFilter) return products
+    const search = searchFilter.toLowerCase()
+    return products.filter((p) =>
+      (p.nom_commercial?.toLowerCase().includes(search)) ||
+      (p.code_cip?.includes(search)) ||
+      (p.libelle_groupe?.toLowerCase().includes(search))
     )
+  }
+
+  const handleRowClick = (product: CatalogueProduitDetail) => {
+    if (product.groupe_generique_id) {
+      setSelectedGroupe(product.groupe_generique_id)
+      setSelectedCip(product.code_cip || undefined)
+    }
   }
 
   return (
@@ -112,7 +141,7 @@ export function Comparaison() {
             </TabsTrigger>
             <TabsTrigger value="catalogues">
               <FlaskConical className="mr-2 h-4 w-4" />
-              Catalogues (Groupes Génériques)
+              Catalogues Labos
             </TabsTrigger>
           </TabsList>
 
@@ -274,7 +303,7 @@ export function Comparaison() {
               <CardHeader>
                 <CardTitle>Comparer les catalogues</CardTitle>
                 <CardDescription>
-                  Selectionnez deux laboratoires pour voir les groupes génériques communs et exclusifs
+                  Selectionnez deux laboratoires pour comparer leurs references produits
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -341,6 +370,9 @@ export function Comparaison() {
                     <CardContent>
                       <div className="text-3xl font-bold">{catalogueComparison.communes.count}</div>
                       <p className="text-sm text-muted-foreground">groupes partages</p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {catalogueComparison.communes.produits_labo1.length} ref. {catalogueComparison.labo1.nom}
+                      </p>
                     </CardContent>
                   </Card>
 
@@ -356,6 +388,9 @@ export function Comparaison() {
                     <CardContent>
                       <div className="text-3xl font-bold">{catalogueComparison.only_labo1.count}</div>
                       <p className="text-sm text-muted-foreground">groupes exclusifs</p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {catalogueComparison.only_labo1.produits.length} references
+                      </p>
                     </CardContent>
                   </Card>
 
@@ -371,6 +406,9 @@ export function Comparaison() {
                     <CardContent>
                       <div className="text-3xl font-bold">{catalogueComparison.only_labo2.count}</div>
                       <p className="text-sm text-muted-foreground">groupes exclusifs</p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {catalogueComparison.only_labo2.produits.length} references
+                      </p>
                     </CardContent>
                   </Card>
                 </div>
@@ -391,72 +429,112 @@ export function Comparaison() {
                   </div>
                 </div>
 
-                {/* Groupes List */}
+                {/* Products Table */}
                 <Card>
                   <CardHeader>
                     <div className="flex items-center justify-between">
                       <CardTitle>
                         {activeSection === 'communes' && (
-                          <span className="text-green-600">Groupes communs ({catalogueComparison.communes.count})</span>
+                          <span className="text-green-600">
+                            References {catalogueComparison.labo1.nom} (groupes communs)
+                          </span>
                         )}
                         {activeSection === 'only1' && (
                           <span className="text-blue-600">
-                            Exclusifs a {catalogueComparison.labo1.nom} ({catalogueComparison.only_labo1.count})
+                            References exclusives {catalogueComparison.labo1.nom}
                           </span>
                         )}
                         {activeSection === 'only2' && (
                           <span className="text-orange-600">
-                            Exclusifs a {catalogueComparison.labo2.nom} ({catalogueComparison.only_labo2.count})
+                            References exclusives {catalogueComparison.labo2.nom}
                           </span>
                         )}
                       </CardTitle>
                       <div className="relative w-64">
                         <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
                         <Input
-                          placeholder="Rechercher un groupe..."
+                          placeholder="Rechercher..."
                           value={searchFilter}
                           onChange={(e) => setSearchFilter(e.target.value)}
                           className="pl-8"
                         />
                       </div>
                     </div>
+                    <CardDescription>
+                      Cliquez sur une reference pour voir les equivalents generiques
+                    </CardDescription>
                   </CardHeader>
                   <CardContent>
-                    <div className="max-h-[400px] overflow-y-auto">
-                      <div className="flex flex-wrap gap-2">
-                        {filterMolecules(
-                          activeSection === 'communes'
-                            ? catalogueComparison.communes.molecules
-                            : activeSection === 'only1'
-                              ? catalogueComparison.only_labo1.molecules
-                              : catalogueComparison.only_labo2.molecules
-                        ).map((molecule, idx) => (
-                          <Badge
-                            key={idx}
-                            variant="outline"
-                            className={
-                              activeSection === 'communes'
-                                ? 'bg-green-50 text-green-700 border-green-200'
-                                : activeSection === 'only1'
-                                  ? 'bg-blue-50 text-blue-700 border-blue-200'
-                                  : 'bg-orange-50 text-orange-700 border-orange-200'
-                            }
-                          >
-                            {molecule}
-                          </Badge>
-                        ))}
-                        {filterMolecules(
-                          activeSection === 'communes'
-                            ? catalogueComparison.communes.molecules
-                            : activeSection === 'only1'
-                              ? catalogueComparison.only_labo1.molecules
-                              : catalogueComparison.only_labo2.molecules
-                        ).length === 0 && (
-                          <p className="text-muted-foreground text-sm">
-                            {searchFilter ? 'Aucun groupe trouve' : 'Aucun groupe dans cette categorie'}
-                          </p>
-                        )}
-                      </div>
+                    <div className="max-h-[500px] overflow-y-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Code CIP</TableHead>
+                            <TableHead>Reference</TableHead>
+                            <TableHead className="text-right">Prix BDPM</TableHead>
+                            <TableHead className="text-right">Prix Catalogue</TableHead>
+                            <TableHead className="text-right">Remise</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {filterProducts(getCurrentProducts()).slice(0, 200).map((product) => (
+                            <TableRow
+                              key={product.id}
+                              className={`${product.groupe_generique_id ? 'cursor-pointer hover:bg-muted/50' : ''}`}
+                              onClick={() => handleRowClick(product)}
+                            >
+                              <TableCell className="font-mono text-sm">
+                                {product.code_cip || '-'}
+                              </TableCell>
+                              <TableCell>
+                                <div>
+                                  <p className="font-medium">{product.nom_commercial || '-'}</p>
+                                  {product.libelle_groupe && (
+                                    <p className="text-xs text-muted-foreground truncate max-w-[300px]">
+                                      {product.libelle_groupe}
+                                    </p>
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-right">
+                                {product.prix_bdpm ? formatCurrency(product.prix_bdpm) : (
+                                  <span className="text-muted-foreground">-</span>
+                                )}
+                              </TableCell>
+                              <TableCell className="text-right">
+                                {product.prix_catalogue ? (
+                                  <span className={product.prix_bdpm && product.prix_catalogue !== product.prix_bdpm ? 'text-amber-600' : ''}>
+                                    {formatCurrency(product.prix_catalogue)}
+                                  </span>
+                                ) : (
+                                  <span className="text-muted-foreground">-</span>
+                                )}
+                              </TableCell>
+                              <TableCell className="text-right">
+                                {product.remise_pct ? (
+                                  <Badge variant="outline" className="bg-green-50 text-green-700">
+                                    {formatPercent(product.remise_pct)}
+                                  </Badge>
+                                ) : (
+                                  <span className="text-muted-foreground">-</span>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                          {filterProducts(getCurrentProducts()).length === 0 && (
+                            <TableRow>
+                              <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                                {searchFilter ? 'Aucune reference trouvee' : 'Aucune reference dans cette categorie'}
+                              </TableCell>
+                            </TableRow>
+                          )}
+                        </TableBody>
+                      </Table>
+                      {filterProducts(getCurrentProducts()).length > 200 && (
+                        <p className="text-center text-sm text-muted-foreground mt-4">
+                          Affichage des 200 premiers resultats sur {filterProducts(getCurrentProducts()).length}
+                        </p>
+                      )}
                     </div>
                   </CardContent>
                 </Card>
@@ -465,6 +543,14 @@ export function Comparaison() {
           </TabsContent>
         </Tabs>
       </div>
+
+      {/* GroupeDrawer */}
+      <GroupeDrawer
+        groupeId={selectedGroupe}
+        currentCip={selectedCip}
+        open={!!selectedGroupe}
+        onClose={() => setSelectedGroupe(null)}
+      />
     </div>
   )
 }

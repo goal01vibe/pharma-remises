@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker-compose ps:*)",
+      "Bash(alembic current:*)",
+      "Bash(alembic upgrade:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(DATABASE_URL=\"postgresql://postgres:postgres@localhost:5433/pharma_remises_test\" alembic upgrade:*)",
+      "Bash(DATABASE_URL=\"postgresql://postgres:postgres@localhost:5433/pharma_remises_test\" alembic current:*)",
+      "Bash(DATABASE_URL=\"postgresql://postgres:postgres@localhost:5433/pharma_remises_test\" alembic history:*)",
+      "Bash(docker exec:*)",
+      "Bash(npm run build:*)",
+      "Bash(docker ps:*)",
+      "Bash(curl:*)"
+    ]
+  }
+}

@@ -7,7 +7,7 @@ import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Checkbox } from '@/components/ui/checkbox'
-import { Loader2, AlertTriangle, Trash2 } from 'lucide-react'
+import { Loader2, AlertTriangle, Trash2, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react'
 import {
   Dialog,
   DialogContent,
@@ -42,6 +42,7 @@ import {
   type BestComboResponse,
   type ProcessSalesResponse,
 } from '@/lib/api'
+import { GroupeDrawer } from '@/components/GroupeDrawer'
 
 // Format currency
 const formatEuro = (value: number) => {
@@ -66,6 +67,19 @@ export function SimulationIntelligente() {
   // State pour lignes ignorees
   const [showIgnoredDialog, setShowIgnoredDialog] = useState(false)
   const [selectedIgnoredIds, setSelectedIgnoredIds] = useState<number[]>([])
+
+  // Drawer groupe generique
+  const [selectedGroupe, setSelectedGroupe] = useState<number | null>(null)
+  const [selectedCip, setSelectedCip] = useState<string>()
+
+  // Filtre par type de matching (stats cliquables)
+  const [matchTypeFilter, setMatchTypeFilter] = useState<string | null>(null)
+
+  // Tri des colonnes
+  type SortColumn = 'designation' | 'produit_nom' | 'prix_bdpm' | 'prix_labo' | 'match_score' | 'remise_totale_pct' | 'montant_total_remise'
+  type SortDirection = 'asc' | 'desc'
+  const [sortColumn, setSortColumn] = useState<SortColumn | null>(null)
+  const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
 
   // Queries
   const { data: imports } = useQuery({
@@ -132,6 +146,99 @@ export function SimulationIntelligente() {
       (line) => line.match_type === 'sans_prix'
     )
   }, [simulationResult?.details])
+
+  // Memo pour filtrer et trier par type de matching
+  const filteredDetails = useMemo(() => {
+    if (!simulationResult?.details) return []
+
+    // 1. Filtrer
+    let filtered = simulationResult.details
+    if (matchTypeFilter === 'no_match') {
+      filtered = simulationResult.details.filter((line) => !line.disponible)
+    } else if (matchTypeFilter) {
+      filtered = simulationResult.details.filter((line) => line.match_type === matchTypeFilter)
+    }
+
+    // 2. Trier si une colonne est selectionnee
+    if (sortColumn) {
+      filtered = [...filtered].sort((a, b) => {
+        let aVal: string | number | null = null
+        let bVal: string | number | null = null
+
+        switch (sortColumn) {
+          case 'designation':
+            aVal = a.designation?.toLowerCase() || ''
+            bVal = b.designation?.toLowerCase() || ''
+            break
+          case 'produit_nom':
+            aVal = a.produit_nom?.toLowerCase() || ''
+            bVal = b.produit_nom?.toLowerCase() || ''
+            break
+          case 'prix_bdpm':
+            aVal = a.prix_bdpm != null ? Number(a.prix_bdpm) : -Infinity
+            bVal = b.prix_bdpm != null ? Number(b.prix_bdpm) : -Infinity
+            break
+          case 'prix_labo':
+            aVal = a.prix_labo != null ? Number(a.prix_labo) : -Infinity
+            bVal = b.prix_labo != null ? Number(b.prix_labo) : -Infinity
+            break
+          case 'match_score':
+            aVal = a.match_score != null ? Number(a.match_score) : -Infinity
+            bVal = b.match_score != null ? Number(b.match_score) : -Infinity
+            break
+          case 'remise_totale_pct':
+            aVal = a.remise_totale_pct != null ? Number(a.remise_totale_pct) : -Infinity
+            bVal = b.remise_totale_pct != null ? Number(b.remise_totale_pct) : -Infinity
+            break
+          case 'montant_total_remise':
+            aVal = a.montant_total_remise != null ? Number(a.montant_total_remise) : -Infinity
+            bVal = b.montant_total_remise != null ? Number(b.montant_total_remise) : -Infinity
+            break
+        }
+
+        // Comparaison
+        if (aVal === bVal) return 0
+        if (typeof aVal === 'string' && typeof bVal === 'string') {
+          return sortDirection === 'asc'
+            ? aVal.localeCompare(bVal, 'fr')
+            : bVal.localeCompare(aVal, 'fr')
+        }
+        // Numbers
+        return sortDirection === 'asc'
+          ? (aVal as number) - (bVal as number)
+          : (bVal as number) - (aVal as number)
+      })
+    }
+
+    return filtered
+  }, [simulationResult?.details, matchTypeFilter, sortColumn, sortDirection])
+
+  // Handler pour le tri des colonnes
+  const handleSort = (column: SortColumn) => {
+    if (sortColumn === column) {
+      // Meme colonne: toggle direction ou reset
+      if (sortDirection === 'asc') {
+        setSortDirection('desc')
+      } else {
+        setSortColumn(null)
+        setSortDirection('asc')
+      }
+    } else {
+      // Nouvelle colonne: asc par defaut
+      setSortColumn(column)
+      setSortDirection('asc')
+    }
+  }
+
+  // Composant icone de tri
+  const SortIcon = ({ column }: { column: SortColumn }) => {
+    if (sortColumn !== column) {
+      return <ArrowUpDown className="ml-1 h-3 w-3 opacity-50" />
+    }
+    return sortDirection === 'asc'
+      ? <ArrowUp className="ml-1 h-3 w-3" />
+      : <ArrowDown className="ml-1 h-3 w-3" />
+  }
 
   // Handlers
   const handleProcessMatching = (forceRematch = false) => {
@@ -292,7 +399,7 @@ export function SimulationIntelligente() {
                 <SelectContent>
                   {targetLabs.map((labo) => (
                     <SelectItem key={labo.id} value={labo.id.toString()}>
-                      {labo.nom} ({labo.remise_negociee || 0}%)
+                      {labo.nom}{labo.remise_negociee ? ` (Remise: ${labo.remise_negociee}%)` : ''}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -578,28 +685,68 @@ export function SimulationIntelligente() {
                     </Card>
                   </div>
 
-                  {/* Matching stats */}
+                  {/* Matching stats - Cliquables pour filtrer */}
                   <div className="p-4 bg-muted rounded-lg">
-                    <h4 className="font-medium mb-2">Stats Matching</h4>
+                    <div className="flex items-center justify-between mb-2">
+                      <h4 className="font-medium">Stats Matching</h4>
+                      {matchTypeFilter && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setMatchTypeFilter(null)}
+                        >
+                          Effacer filtre
+                        </Button>
+                      )}
+                    </div>
                     <div className="flex flex-wrap gap-2">
-                      <Badge variant="outline">
+                      <Badge
+                        variant={matchTypeFilter === 'exact_cip' ? 'default' : 'outline'}
+                        className="cursor-pointer hover:bg-primary/20 transition-colors"
+                        onClick={() => setMatchTypeFilter(matchTypeFilter === 'exact_cip' ? null : 'exact_cip')}
+                      >
                         CIP exact: {simulationResult.matching_stats.exact_cip}
                       </Badge>
-                      <Badge variant="outline">
+                      <Badge
+                        variant={matchTypeFilter === 'groupe_generique' ? 'default' : 'outline'}
+                        className="cursor-pointer hover:bg-primary/20 transition-colors"
+                        onClick={() => setMatchTypeFilter(matchTypeFilter === 'groupe_generique' ? null : 'groupe_generique')}
+                      >
                         Groupe gen: {simulationResult.matching_stats.groupe_generique}
                       </Badge>
-                      <Badge variant="outline">
-                        Fuzzy mol: {simulationResult.matching_stats.fuzzy_molecule}
-                      </Badge>
-                      <Badge variant="outline">
-                        Fuzzy nom: {simulationResult.matching_stats.fuzzy_commercial}
-                      </Badge>
-                      <Badge variant="destructive">
+                      {/* Fuzzy matching desactive - dangereux en pharmacie */}
+                      <Badge
+                        variant={matchTypeFilter === 'no_match' ? 'destructive' : 'outline'}
+                        className="cursor-pointer hover:bg-destructive/20 transition-colors"
+                        onClick={() => setMatchTypeFilter(matchTypeFilter === 'no_match' ? null : 'no_match')}
+                      >
                         No match: {simulationResult.matching_stats.no_match}
                       </Badge>
                     </div>
-                    <div className="text-xs text-muted-foreground mt-2">
-                      Score moyen: {simulationResult.matching_stats.avg_score}%
+                    <div className="text-xs text-muted-foreground mt-2 flex flex-wrap gap-4">
+                      <span>Score moyen: {simulationResult.matching_stats.avg_score}%</span>
+                      {matchTypeFilter && (
+                        <span className="text-primary font-medium">
+                          Filtre: {matchTypeFilter} ({filteredDetails.length} lignes)
+                        </span>
+                      )}
+                      {sortColumn && (
+                        <span className="text-blue-600 font-medium">
+                          Tri: {sortColumn === 'designation' ? 'Designation' :
+                                sortColumn === 'produit_nom' ? 'Produit' :
+                                sortColumn === 'prix_bdpm' ? 'Prix BDPM' :
+                                sortColumn === 'prix_labo' ? 'Prix Labo' :
+                                sortColumn === 'match_score' ? 'Match' :
+                                sortColumn === 'remise_totale_pct' ? 'Remise' :
+                                'Total'} ({sortDirection === 'asc' ? '↑' : '↓'})
+                          <button
+                            className="ml-1 text-muted-foreground hover:text-destructive"
+                            onClick={() => { setSortColumn(null); setSortDirection('asc') }}
+                          >
+                            ✕
+                          </button>
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -608,19 +755,99 @@ export function SimulationIntelligente() {
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          <TableHead>Designation</TableHead>
-                          <TableHead className="text-right">Prix BDPM</TableHead>
-                          <TableHead className="text-right">Prix Labo</TableHead>
-                          <TableHead>Match</TableHead>
-                          <TableHead className="text-right">Remise</TableHead>
-                          <TableHead className="text-right">Total</TableHead>
+                          <TableHead
+                            className="cursor-pointer hover:bg-muted/50 select-none"
+                            onClick={() => handleSort('designation')}
+                          >
+                            <div className="flex items-center">
+                              Designation Vente
+                              <SortIcon column="designation" />
+                            </div>
+                          </TableHead>
+                          <TableHead
+                            className="cursor-pointer hover:bg-muted/50 select-none"
+                            onClick={() => handleSort('produit_nom')}
+                          >
+                            <div className="flex items-center">
+                              Produit Matche
+                              <SortIcon column="produit_nom" />
+                            </div>
+                          </TableHead>
+                          <TableHead
+                            className="cursor-pointer hover:bg-muted/50 select-none text-right"
+                            onClick={() => handleSort('prix_bdpm')}
+                          >
+                            <div className="flex items-center justify-end">
+                              Prix BDPM
+                              <SortIcon column="prix_bdpm" />
+                            </div>
+                          </TableHead>
+                          <TableHead
+                            className="cursor-pointer hover:bg-muted/50 select-none text-right"
+                            onClick={() => handleSort('prix_labo')}
+                          >
+                            <div className="flex items-center justify-end">
+                              Prix Labo
+                              <SortIcon column="prix_labo" />
+                            </div>
+                          </TableHead>
+                          <TableHead
+                            className="cursor-pointer hover:bg-muted/50 select-none"
+                            onClick={() => handleSort('match_score')}
+                          >
+                            <div className="flex items-center">
+                              Match
+                              <SortIcon column="match_score" />
+                            </div>
+                          </TableHead>
+                          <TableHead
+                            className="cursor-pointer hover:bg-muted/50 select-none text-right"
+                            onClick={() => handleSort('remise_totale_pct')}
+                          >
+                            <div className="flex items-center justify-end">
+                              Remise
+                              <SortIcon column="remise_totale_pct" />
+                            </div>
+                          </TableHead>
+                          <TableHead
+                            className="cursor-pointer hover:bg-muted/50 select-none text-right"
+                            onClick={() => handleSort('montant_total_remise')}
+                          >
+                            <div className="flex items-center justify-end">
+                              Total
+                              <SortIcon column="montant_total_remise" />
+                            </div>
+                          </TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {simulationResult.details.slice(0, 50).map((line) => (
-                          <TableRow key={line.vente_id}>
-                            <TableCell className="max-w-[200px] truncate">
+                        {filteredDetails.slice(0, 100).map((line) => (
+                          <TableRow
+                            key={line.vente_id}
+                            className={line.groupe_generique_id ? "cursor-pointer hover:bg-muted/50" : ""}
+                            onClick={() => {
+                              if (line.groupe_generique_id) {
+                                setSelectedGroupe(line.groupe_generique_id)
+                                setSelectedCip(line.produit_cip || undefined)
+                              }
+                            }}
+                          >
+                            <TableCell className="max-w-[180px] truncate" title={line.designation}>
                               {line.designation}
+                            </TableCell>
+                            <TableCell className="max-w-[180px]">
+                              {line.produit_nom ? (
+                                <div className="truncate" title={`${line.produit_nom} (${line.produit_cip || '-'})`}>
+                                  <span className="text-sm">{line.produit_nom}</span>
+                                  {line.produit_cip && (
+                                    <span className="text-xs text-muted-foreground block">
+                                      CIP: {line.produit_cip}
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-muted-foreground text-sm">-</span>
+                              )}
                             </TableCell>
                             <TableCell className="text-right text-sm">
                               {line.prix_bdpm ? formatEuro(Number(line.prix_bdpm)) : '-'}
@@ -671,9 +898,9 @@ export function SimulationIntelligente() {
                         ))}
                       </TableBody>
                     </Table>
-                    {simulationResult.details.length > 50 && (
+                    {filteredDetails.length > 100 && (
                       <div className="p-2 text-center text-sm text-muted-foreground border-t">
-                        ... et {simulationResult.details.length - 50} autres lignes
+                        ... et {filteredDetails.length - 100} autres lignes
                       </div>
                     )}
                   </div>
@@ -863,6 +1090,14 @@ export function SimulationIntelligente() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Drawer details groupe */}
+      <GroupeDrawer
+        groupeId={selectedGroupe}
+        currentCip={selectedCip}
+        open={!!selectedGroupe}
+        onClose={() => setSelectedGroupe(null)}
+      />
     </div>
   )
 }

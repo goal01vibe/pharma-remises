@@ -20,19 +20,31 @@ def list_ventes(
     if import_id:
         query = query.filter(MesVentes.import_id == import_id)
 
-    return query.order_by(MesVentes.montant_annuel.desc()).limit(1000).all()
+    # Pas de limite - retourner toutes les ventes
+    return query.order_by(MesVentes.montant_annuel.desc()).all()
 
 
 @router.get("/imports", response_model=List[ImportResponse])
 def list_ventes_imports(db: Session = Depends(get_db)):
-    """Liste les imports de type ventes reussis uniquement."""
-    return (
+    """Liste les imports de type ventes reussis uniquement avec le nombre REEL de ventes."""
+    from sqlalchemy import func
+
+    imports = (
         db.query(Import)
         .filter(Import.type_import == "ventes")
-        .filter(Import.statut == "termine")  # Seulement les imports reussis
+        .filter(Import.statut == "termine")
         .order_by(Import.created_at.desc())
         .all()
     )
+
+    # Mettre a jour nb_lignes_importees avec le compte REEL en base
+    for imp in imports:
+        real_count = db.query(func.count(MesVentes.id)).filter(
+            MesVentes.import_id == imp.id
+        ).scalar()
+        imp.nb_lignes_importees = real_count
+
+    return imports
 
 
 @router.delete("/{vente_id}")
